@@ -4,10 +4,9 @@ const io = std.io;
 const mem = std.mem;
 const eql = mem.eql;
 const testing = std.testing;
-//const gpa = heap.GeneralPurposeAllocator(.{}).allocator;
-const gpa = heap.page_allocator;
+const Big = std.builtin.Endian.big;
 
-const print = std.io.getStdOut().writer().print;
+const print = std.debug.print;
 
 const MessageType = enum(u8) {
     confirmable = 0,
@@ -69,31 +68,6 @@ const OptionType = enum(u16) {
     no_response = 258,
 };
 
-const OptionU = union(OptionType) {
-    unknown,
-    if_match: []const u8,
-    uri_host: []const u8,
-    etag: []const u8,
-    if_none_match: []const u8,
-    observe: []const u8,
-    uri_port: []const u8,
-    location_path: []const u8,
-    oscore: []const u8,
-    uri_path: []const u8,
-    content_format: []const u8,
-    max_age: []const u8,
-    uri_query: []const u8,
-    accept: []const u8,
-    location_query: []const u8,
-    block1: []const u8,
-    block2: []const u8,
-    proxy_uri: []const u8,
-    proxy_scheme: []const u8,
-    size1: []const u8,
-    size2: []const u8,
-    no_response,
-};
-
 const Option = struct {
     typ: OptionType,
     value: []const u8,
@@ -104,6 +78,8 @@ const Error = error{
 };
 
 pub const Packet = struct {
+    const Self = @This();
+
     typ: MessageType,
     code: Code,
     msg_id: u16,
@@ -111,40 +87,28 @@ pub const Packet = struct {
     options: []Option,
     payload: []const u8,
 
-    const Self = @This();
+    alloc: mem.Allocator,
 
-    fn write(self: Self) ![]u8 {}
-};
-
-const Parser = struct {
-    alloc: *mem.Allocator,
-    const Self = @This();
-
-    pub fn init(allocator: *mem.Allocator) Self {
-        return Self{ .alloc = allocator };
-    }
-
-    // TODO: Check more error cases
-    // TODO: Test with payload and longer options
-    // TODO: Set module global allocator and endianess
-    fn read(self: Self, data: []const u8) !Packet {
-        const r = io.fixedBufferStream(data).reader();
+    // TODO: Handle more protocol errors
+    fn read(alloc: mem.Allocator, data: []const u8) !Packet {
+        var fb = io.fixedBufferStream(data);
+        var r = fb.reader();
 
         const b0 = try r.readByte();
         const b1 = try r.readByte();
-        const msg_id = try r.readIntBig(u16);
+        const msg_id = try r.readInt(u16, Big);
         const token_len = b0 & 0xf;
-        const token = try self.alloc.alloc(u8, token_len);
+        const token = try alloc.alloc(u8, token_len);
+        errdefer alloc.free(token);
         var n = try r.read(token);
 
-        var opts = std.ArrayList(Option).init(self.alloc);
-        const payload = try self.alloc.alloc(u8, 4096);
+        var opts = std.ArrayList(Option).init(alloc);
         var sum: u16 = 0;
+        var has_payload = false;
         while (true) {
             const c0 = r.readByte() catch break;
             if (c0 == 255) {
-                n = try r.readAll(payload);
-                const m = self.alloc.shrink(payload, n);
+                has_payload = true;
                 break;
             }
 
@@ -152,8 +116,8 @@ const Parser = struct {
             if (delta > 15)
                 return Error.TruncatedOption;
             delta = switch (delta) {
-                13 => (try r.readIntBig(u8)) + 13,
-                14 => (try r.readIntBig(u16)) + 269, // TODO: Could this overflow?
+                13 => (try r.readInt(u8, Big)) + 13,
+                14 => (try r.readInt(u16, Big)) + 269, // TODO: Could this overflow?
                 else => delta,
             };
             sum += delta;
@@ -162,36 +126,60 @@ const Parser = struct {
             if (len > 15)
                 return Error.TruncatedOption;
             len = switch (len) {
-                13 => (try r.readIntBig(u8)) + 13,
-                14 => (try r.readIntBig(u16)) + 269,
+                13 => (try r.readInt(u8, Big)) + 13,
+                14 => (try r.readInt(u16, Big)) + 269,
                 else => len,
             };
 
-            const opt_buf = try self.alloc.alloc(u8, len);
+            const opt_buf = try alloc.alloc(u8, len);
+            errdefer alloc.free(opt_buf);
             n = try r.read(opt_buf);
-            const opt_type = @intToEnum(OptionType, sum);
+            const opt_type: OptionType = @enumFromInt(sum);
             const opt = Option{ .typ = opt_type, .value = opt_buf };
             try opts.append(opt);
         }
 
+        // NOTE: Could be cleaner to just keep the ArrayList and free it in the end.
+        //       This creates a new clone of opts.
+        const owned_opts_slice = try opts.toOwnedSlice();
+        opts.deinit();
+
         return Packet{
-            .typ = @intToEnum(MessageType, b0 >> 4 & 0x3),
-            .code = @intToEnum(Code, b1),
+            .alloc = alloc,
+            .typ = @enumFromInt(b0 >> 4 & 0x3),
+            .code = @enumFromInt(b1),
             .msg_id = msg_id,
-            .token = token, //data[4..(4 + token_len)],
-            .options = opts.items,
-            .payload = &[_]u8{}, //payload,
+            .token = token,
+            .options = owned_opts_slice,
+            .payload = val: {
+                if (has_payload) {
+                    const payload = try r.readAllAlloc(alloc, 16 * 1024);
+                    errdefer alloc.free(payload);
+                    break :val payload;
+                } else {
+                    break :val &[0]u8{};
+                }
+            },
         };
+    }
+
+    fn write(self: Self) ![]u8 {
+        _ = &self;
+    }
+
+    fn deinit(self: Self) void {
+        self.alloc.free(self.payload);
+        self.alloc.free(self.token);
+        for (self.options) |opt| {
+            self.alloc.free(opt.value);
+        }
+        self.alloc.free(self.options);
     }
 };
 
-fn readU16(p1: u8, p2: u8) u16 {
-    return mem.bigToNative(u16, mem.bytesAsValue(u16, &[_]u8{ p1, p2 }).*);
-}
-
 test "decode" {
-    try print("\n", .{});
-    const parser = Parser.init(gpa);
+    print("\n", .{});
+    const alloc = testing.allocator;
 
     // Bin = <<68,1,186,34,12,83,95,185,184,99,104,101,99,107,95,105,99>>.
     const msg1 = [_]u8{
@@ -199,8 +187,10 @@ test "decode" {
         0xb8, 0x63, 0x68, 0x65, 0x63, 0x6b, 0x5f, 0x69,
         0x63,
     };
-    const packet1 = try parser.read(&msg1);
-    try print("packet1: {}\n", .{packet1});
+    const packet1 = try Packet.read(alloc, &msg1);
+    defer packet1.deinit();
+    print("packet1: {}\n", .{packet1});
+    for (packet1.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
 
     // Bin = <<68,2,62,111,119,104,82,128,177,49,1,50,1,51,255,100,97,116,97>>.
     const msg2 = [_]u8{
@@ -208,16 +198,28 @@ test "decode" {
         0xb1, 0x31, 0x01, 0x32, 0x01, 0x33, 0xff, 0x64,
         0x61, 0x74, 0x61,
     };
-    const packet2 = try parser.read(&msg2);
-    try print("packet2: {}\n", .{packet2});
+    const packet2 = try Packet.read(alloc, &msg2);
+    defer packet2.deinit();
+    print("packet2: {}\n", .{packet2});
+    for (packet2.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
 
     const msg3 = [_]u8{
-        0x44, 0x2,  0x3e, 0x6f, 0x74, 0x6f, 0x6b, 0x31,
-        0xb1, 0x31, 0x1,  0x32, 0x1,  0x33, 0xff, 0x64,
-        0x61, 0x74, 0x61,
+        0x44, 0x01, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
+        0x39, 0x6C, 0x6F, 0x63, 0x61, 0x6C, 0x68, 0x6F,
+        0x73, 0x74, 0x83, 0x74, 0x76, 0x31,
     };
-    const packet3 = try parser.read(&msg3);
-    try print("packet3: {}\n", .{packet3});
+    const packet3 = try Packet.read(alloc, &msg3);
+    defer packet3.deinit();
+    print("packet3: {}\n", .{packet3});
+    for (packet3.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
 
-    for (packet1.options) |opt| try print("opt: {s}\n", .{opt.value});
+    const msg4 = [_]u8{
+        0x64, 0x45, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
+        0xFF, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57,
+        0x6F, 0x72, 0x6C, 0x64, 0x21,
+    };
+    const packet4 = try Packet.read(alloc, &msg4);
+    defer packet4.deinit();
+    print("packet3: {}\n", .{packet4});
+    for (packet4.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
 }
