@@ -10,7 +10,7 @@ pub fn build(b: *std.Build) void {
 
     { // Static library
         const lib = b.addStaticLibrary(.{
-            .name = "coap",
+            .name = "coapz",
             .root_source_file = b.path("src/root.zig"),
             .target = target,
             .optimize = optimize,
