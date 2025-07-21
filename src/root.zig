@@ -1,16 +1,9 @@
 //! Constrained Application Protocol (CoAP) encode/decode library
 //!
 const std = @import("std");
-const heap = std.heap;
-const io = std.io;
-const mem = std.mem;
-const eql = mem.eql;
-const testing = std.testing;
 const Big = std.builtin.Endian.big;
 
-const print = std.debug.print;
-
-const MessageType = enum(u8) {
+const MessageKind = enum(u8) {
     confirmable = 0,
     non_confirmable = 1,
     acknowledgement = 2,
@@ -22,11 +15,15 @@ const Code = enum(u8) {
     post,
     put,
     delete,
+    fetch,
+    patch,
+    ipatch,
     created = 65,
     deleted,
     valid,
     changed,
     content,
+    @"continue" = 95,
     bad_request = 128,
     unauthorized,
     bad_option,
@@ -34,18 +31,23 @@ const Code = enum(u8) {
     not_found,
     method_not_allowed,
     not_acceptable,
+    request_entity_incomplete = 136,
+    conflict,
     precondition_failed = 140,
     request_entity_too_large,
     unsupported_content_format = 143,
+    unprocessable_entity = 150,
+    too_many_requests = 157,
     internal_server_error = 160,
     not_implemented,
     bad_gateway,
     service_unavailable,
     gateway_timeout,
     proxying_not_supported,
+    hop_limit_reached = 168,
 };
 
-const OptionType = enum(u16) {
+const OptionKind = enum(u16) {
     unknown = 0,
     if_match = 1,
     uri_host = 3,
@@ -71,7 +73,7 @@ const OptionType = enum(u16) {
 };
 
 const Option = struct {
-    typ: OptionType,
+    kind: OptionKind,
     value: []const u8,
 };
 
@@ -82,27 +84,28 @@ const Error = error{
 pub const Packet = struct {
     const Self = @This();
 
-    typ: MessageType,
+    kind: MessageKind,
     code: Code,
     msg_id: u16,
     token: []const u8,
     options: []Option,
     payload: []const u8,
 
-    alloc: mem.Allocator,
+    alloc: std.mem.Allocator,
 
-    // TODO: Handle more protocol errors
-    fn read(alloc: mem.Allocator, data: []const u8) !Packet {
-        var fb = io.fixedBufferStream(data);
+    fn read(alloc: std.mem.Allocator, data: []const u8) !Packet {
+        var fb = std.io.fixedBufferStream(data);
         var r = fb.reader();
 
         const b0 = try r.readByte();
         const b1 = try r.readByte();
         const msg_id = try r.readInt(u16, Big);
+
         const token_len = b0 & 0xf;
         const token = try alloc.alloc(u8, token_len);
         errdefer alloc.free(token);
         var n = try r.read(token);
+        std.debug.assert(token_len == n);
 
         var opts = std.ArrayList(Option).init(alloc);
         var sum: u16 = 0;
@@ -114,41 +117,25 @@ pub const Packet = struct {
                 break;
             }
 
-            var delta: u16 = c0 >> 4 & 0xf;
-            if (delta > 15)
-                return Error.TruncatedOption;
-            delta = switch (delta) {
-                13 => (try r.readInt(u8, Big)) + 13,
-                14 => (try r.readInt(u16, Big)) + 269, // TODO: Could this overflow?
-                else => delta,
-            };
-            sum += delta;
-
-            var len: u16 = c0 & 0xf;
-            if (len > 15)
-                return Error.TruncatedOption;
-            len = switch (len) {
-                13 => (try r.readInt(u8, Big)) + 13,
-                14 => (try r.readInt(u16, Big)) + 269,
-                else => len,
-            };
-
+            const len = try readVariableLengthInt(c0 & 0xf, &r);
             const opt_buf = try alloc.alloc(u8, len);
             errdefer alloc.free(opt_buf);
             n = try r.read(opt_buf);
-            const opt_type: OptionType = @enumFromInt(sum);
-            const opt = Option{ .typ = opt_type, .value = opt_buf };
+            std.debug.assert(len == n);
+
+            sum += try readVariableLengthInt(c0 >> 4 & 0xf, &r);
+
+            const opt_type: OptionKind = @enumFromInt(sum);
+            const opt = Option{ .kind = opt_type, .value = opt_buf };
             try opts.append(opt);
         }
 
-        // NOTE: Could be cleaner to just keep the ArrayList and free it in the end.
-        //       This creates a new clone of opts.
+        // NOTE: Could be more efficient to keep the ArrayList (less clean though).
         const owned_opts_slice = try opts.toOwnedSlice();
-        opts.deinit();
 
         return Packet{
             .alloc = alloc,
-            .typ = @enumFromInt(b0 >> 4 & 0x3),
+            .kind = @enumFromInt(b0 >> 4 & 0x3),
             .code = @enumFromInt(b1),
             .msg_id = msg_id,
             .token = token,
@@ -179,9 +166,21 @@ pub const Packet = struct {
     }
 };
 
+// Read variable length int
+fn readVariableLengthInt(c: u8, r: anytype) !u16 {
+    if (c > 15) return Error.TruncatedOption;
+    return switch (c) {
+        13 => (try r.readInt(u8, Big)) + 13,
+        14 => (try r.readInt(u16, Big)) + 269, // TODO: Could this overflow?
+        else => c,
+    };
+}
+
 test "decode" {
+    const print = std.debug.print;
+    const alloc = std.testing.allocator;
+
     print("\n", .{});
-    const alloc = testing.allocator;
 
     // Bin = <<68,1,186,34,12,83,95,185,184,99,104,101,99,107,95,105,99>>.
     const msg1 = [_]u8{
@@ -192,7 +191,7 @@ test "decode" {
     const packet1 = try Packet.read(alloc, &msg1);
     defer packet1.deinit();
     print("packet1: {}\n", .{packet1});
-    for (packet1.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
+    for (packet1.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
 
     // Bin = <<68,2,62,111,119,104,82,128,177,49,1,50,1,51,255,100,97,116,97>>.
     const msg2 = [_]u8{
@@ -203,7 +202,7 @@ test "decode" {
     const packet2 = try Packet.read(alloc, &msg2);
     defer packet2.deinit();
     print("packet2: {}\n", .{packet2});
-    for (packet2.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
+    for (packet2.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
 
     const msg3 = [_]u8{
         0x44, 0x01, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
@@ -213,7 +212,7 @@ test "decode" {
     const packet3 = try Packet.read(alloc, &msg3);
     defer packet3.deinit();
     print("packet3: {}\n", .{packet3});
-    for (packet3.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
+    for (packet3.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
 
     const msg4 = [_]u8{
         0x64, 0x45, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
@@ -223,5 +222,5 @@ test "decode" {
     const packet4 = try Packet.read(alloc, &msg4);
     defer packet4.deinit();
     print("packet3: {}\n", .{packet4});
-    for (packet4.options) |opt| print("opt: {any}=>{s}\n", .{ opt.typ, opt.value });
+    for (packet4.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
 }
