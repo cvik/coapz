@@ -1,3 +1,5 @@
+//! Constrained Application Protocol (CoAP) encode/decode library
+//!
 const std = @import("std");
 const heap = std.heap;
 const io = std.io;
