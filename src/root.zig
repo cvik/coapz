@@ -107,7 +107,8 @@ pub const Packet = struct {
         var n = try r.read(token);
         std.debug.assert(token_len == n);
 
-        var opts = std.ArrayList(Option).init(alloc);
+        var opts = std.ArrayList(Option).empty;
+        errdefer opts.deinit(alloc);
         var sum: u16 = 0;
         var has_payload = false;
         while (true) {
@@ -127,11 +128,11 @@ pub const Packet = struct {
 
             const opt_type: OptionKind = @enumFromInt(sum);
             const opt = Option{ .kind = opt_type, .value = opt_buf };
-            try opts.append(opt);
+            try opts.append(alloc, opt);
         }
 
         // NOTE: Could be more efficient to keep the ArrayList (less clean though).
-        const owned_opts_slice = try opts.toOwnedSlice();
+        const owned_opts_slice = try opts.toOwnedSlice(alloc);
 
         return Packet{
             .alloc = alloc,
@@ -204,6 +205,7 @@ test "decode" {
     print("packet2: {}\n", .{packet2});
     for (packet2.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
 
+    // Bin = <<68,1,93,31,0,0,57,116,57,108,111,99,97,108,104,111,115,116,131,116,118,49>>.
     const msg3 = [_]u8{
         0x44, 0x01, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
         0x39, 0x6C, 0x6F, 0x63, 0x61, 0x6C, 0x68, 0x6F,
@@ -214,6 +216,7 @@ test "decode" {
     print("packet3: {}\n", .{packet3});
     for (packet3.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
 
+    // Bin = <<100,69,93,31,0,0,57,116,255,72,101,108,108,111,32,87,111,114,108,100,33>>.
     const msg4 = [_]u8{
         0x64, 0x45, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
         0xFF, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57,
@@ -221,6 +224,6 @@ test "decode" {
     };
     const packet4 = try Packet.read(alloc, &msg4);
     defer packet4.deinit();
-    print("packet3: {}\n", .{packet4});
+    print("packet4: {}\n", .{packet4});
     for (packet4.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
 }
