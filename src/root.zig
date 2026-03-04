@@ -90,105 +90,144 @@ pub const Packet = struct {
     token: []const u8,
     options: []Option,
     payload: []const u8,
+    _data_buf: []u8,
 
     alloc: std.mem.Allocator,
 
-    fn read(alloc: std.mem.Allocator, data: []const u8) !Packet {
-        var fb = std.io.fixedBufferStream(data);
-        var r = fb.reader();
+    pub fn read(alloc: std.mem.Allocator, data: []const u8) !Packet {
+        const b0 = data[0];
+        const b1 = data[1];
+        const msg_id: u16 = @as(u16, data[2]) << 8 | data[3];
+        const token_len: usize = b0 & 0xf;
 
-        const b0 = try r.readByte();
-        const b1 = try r.readByte();
-        const msg_id = try r.readInt(u16, Big);
+        // Pass 1: count options and compute total data size
+        var pos: usize = 4 + token_len;
+        var opt_count: usize = 0;
+        var data_size: usize = token_len;
+        var payload_start: usize = 0;
 
-        const token_len = b0 & 0xf;
-        const token = try alloc.alloc(u8, token_len);
-        errdefer alloc.free(token);
-        var n = try r.read(token);
-        std.debug.assert(token_len == n);
-
-        var opts = std.ArrayList(Option).empty;
-        errdefer opts.deinit(alloc);
-        var sum: u16 = 0;
-        var has_payload = false;
-        while (true) {
-            const c0 = r.readByte() catch break;
-            if (c0 == 255) {
-                has_payload = true;
+        while (pos < data.len) {
+            const c0 = data[pos];
+            pos += 1;
+            if (c0 == 0xff) {
+                payload_start = pos;
+                data_size += data.len - pos;
                 break;
             }
-
-            sum += try readVariableLengthInt(c0 >> 4 & 0xf, &r);
-            const len = try readVariableLengthInt(c0 & 0xf, &r);
-            const opt_buf = try alloc.alloc(u8, len);
-            errdefer alloc.free(opt_buf);
-            n = try r.read(opt_buf);
-            std.debug.assert(len == n);
-
-            const opt_type: OptionKind = @enumFromInt(sum);
-            const opt = Option{ .kind = opt_type, .value = opt_buf };
-            try opts.append(alloc, opt);
+            _ = try readVarLenDirect(data, &pos, @intCast(c0 >> 4 & 0xf));
+            const val_len = try readVarLenDirect(data, &pos, @intCast(c0 & 0xf));
+            data_size += val_len;
+            pos += val_len;
+            opt_count += 1;
         }
 
-        // NOTE: Could be more efficient to keep the ArrayList (less clean though).
-        const owned_opts_slice = try opts.toOwnedSlice(alloc);
+        // Pass 2: allocate and populate
+        const data_buf = try alloc.alloc(u8, data_size);
+        errdefer alloc.free(data_buf);
+        const options = try alloc.alloc(Option, opt_count);
+        errdefer alloc.free(options);
 
-        return Packet{
+        // Copy token
+        var buf_pos: usize = 0;
+        @memcpy(data_buf[0..token_len], data[4 .. 4 + token_len]);
+        const token = data_buf[0..token_len];
+        buf_pos = token_len;
+
+        // Parse and copy options
+        pos = 4 + token_len;
+        var delta_sum: u16 = 0;
+        for (options) |*opt| {
+            const c0 = data[pos];
+            pos += 1;
+            delta_sum += try readVarLenDirect(data, &pos, @intCast(c0 >> 4 & 0xf));
+            const val_len = try readVarLenDirect(data, &pos, @intCast(c0 & 0xf));
+            @memcpy(data_buf[buf_pos .. buf_pos + val_len], data[pos .. pos + val_len]);
+            opt.* = .{
+                .kind = @enumFromInt(delta_sum),
+                .value = data_buf[buf_pos .. buf_pos + val_len],
+            };
+            buf_pos += val_len;
+            pos += val_len;
+        }
+
+        // Copy payload
+        var payload: []const u8 = &[0]u8{};
+        if (payload_start > 0) {
+            const payload_len = data.len - payload_start;
+            @memcpy(data_buf[buf_pos .. buf_pos + payload_len], data[payload_start..data.len]);
+            payload = data_buf[buf_pos .. buf_pos + payload_len];
+        }
+
+        return .{
             .alloc = alloc,
             .kind = @enumFromInt(b0 >> 4 & 0x3),
             .code = @enumFromInt(b1),
             .msg_id = msg_id,
             .token = token,
-            .options = owned_opts_slice,
-            .payload = val: {
-                if (has_payload) {
-                    const payload = try r.readAllAlloc(alloc, 16 * 1024);
-                    errdefer alloc.free(payload);
-                    break :val payload;
-                } else {
-                    break :val &[0]u8{};
-                }
-            },
+            .options = options,
+            .payload = payload,
+            ._data_buf = data_buf,
         };
     }
 
-    fn write(self: Self) ![]u8 {
-        var buf = std.ArrayList(u8).empty;
-        errdefer buf.deinit(self.alloc);
-
-        const token_len: u8 = @intCast(self.token.len);
-        try buf.append(self.alloc, (1 << 6) | (@as(u8, @intFromEnum(self.kind)) << 4) | token_len);
-        try buf.append(self.alloc, @intFromEnum(self.code));
-        try buf.append(self.alloc, @intCast(self.msg_id >> 8));
-        try buf.append(self.alloc, @intCast(self.msg_id & 0xff));
-        try buf.appendSlice(self.alloc, self.token);
-
+    pub fn write(self: Self) ![]u8 {
+        // Calculate exact output size
+        var size: usize = 4 + self.token.len;
         var prev: u16 = 0;
         for (self.options) |opt| {
             const num = @intFromEnum(opt.kind);
             const delta = num - prev;
             const len: u16 = @intCast(opt.value.len);
-            try buf.append(self.alloc, (optNibble(delta) << 4) | optNibble(len));
-            try writeOptExtended(&buf, self.alloc, delta);
-            try writeOptExtended(&buf, self.alloc, len);
-            try buf.appendSlice(self.alloc, opt.value);
+            size += 1 + extendedSize(delta) + extendedSize(len) + opt.value.len;
+            prev = num;
+        }
+        if (self.payload.len > 0) {
+            size += 1 + self.payload.len;
+        }
+
+        // Single allocation
+        const buf = try self.alloc.alloc(u8, size);
+        errdefer self.alloc.free(buf);
+
+        // Header
+        const token_len: u8 = @intCast(self.token.len);
+        buf[0] = (1 << 6) | (@as(u8, @intFromEnum(self.kind)) << 4) | token_len;
+        buf[1] = @intFromEnum(self.code);
+        buf[2] = @intCast(self.msg_id >> 8);
+        buf[3] = @intCast(self.msg_id & 0xff);
+
+        // Token
+        var pos: usize = 4;
+        @memcpy(buf[4 .. 4 + self.token.len], self.token);
+        pos += self.token.len;
+
+        // Options
+        prev = 0;
+        for (self.options) |opt| {
+            const num = @intFromEnum(opt.kind);
+            const delta = num - prev;
+            const len: u16 = @intCast(opt.value.len);
+            buf[pos] = (optNibble(delta) << 4) | optNibble(len);
+            pos += 1;
+            writeExtDirect(buf, &pos, delta);
+            writeExtDirect(buf, &pos, len);
+            @memcpy(buf[pos .. pos + opt.value.len], opt.value);
+            pos += opt.value.len;
             prev = num;
         }
 
+        // Payload
         if (self.payload.len > 0) {
-            try buf.append(self.alloc, 0xff);
-            try buf.appendSlice(self.alloc, self.payload);
+            buf[pos] = 0xff;
+            pos += 1;
+            @memcpy(buf[pos .. pos + self.payload.len], self.payload);
         }
 
-        return buf.toOwnedSlice(self.alloc);
+        return buf;
     }
 
-    fn deinit(self: Self) void {
-        self.alloc.free(self.payload);
-        self.alloc.free(self.token);
-        for (self.options) |opt| {
-            self.alloc.free(opt.value);
-        }
+    pub fn deinit(self: Self) void {
+        self.alloc.free(self._data_buf);
         self.alloc.free(self.options);
     }
 };
@@ -199,25 +238,44 @@ fn optNibble(val: u16) u8 {
     return 14;
 }
 
-fn writeOptExtended(buf: *std.ArrayList(u8), alloc: std.mem.Allocator, val: u16) !void {
+fn writeExtDirect(buf: []u8, pos: *usize, val: u16) void {
     switch (optNibble(val)) {
-        13 => try buf.append(alloc, @intCast(val - 13)),
+        13 => {
+            buf[pos.*] = @intCast(val - 13);
+            pos.* += 1;
+        },
         14 => {
             const ext = val - 269;
-            try buf.append(alloc, @intCast(ext >> 8));
-            try buf.append(alloc, @intCast(ext & 0xff));
+            buf[pos.*] = @intCast(ext >> 8);
+            buf[pos.* + 1] = @intCast(ext & 0xff);
+            pos.* += 2;
         },
         else => {},
     }
 }
 
-// Read variable length int
-fn readVariableLengthInt(c: u8, r: anytype) !u16 {
-    if (c > 15) return Error.TruncatedOption;
-    return switch (c) {
-        13 => @as(u16, try r.readInt(u8, Big)) + 13,
-        14 => @intCast(@as(u32, try r.readInt(u16, Big)) + 269),
-        else => c,
+fn extendedSize(val: u16) usize {
+    return switch (optNibble(val)) {
+        13 => 1,
+        14 => 2,
+        else => 0,
+    };
+}
+
+fn readVarLenDirect(data: []const u8, pos: *usize, nibble: u4) !u16 {
+    return switch (nibble) {
+        13 => blk: {
+            const v: u16 = data[pos.*];
+            pos.* += 1;
+            break :blk v + 13;
+        },
+        14 => blk: {
+            const v: u16 = @as(u16, data[pos.*]) << 8 | data[pos.* + 1];
+            pos.* += 2;
+            break :blk v + 269;
+        },
+        15 => Error.TruncatedOption,
+        else => nibble,
     };
 }
 
