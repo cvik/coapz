@@ -80,7 +80,10 @@ const Option = struct {
 };
 
 const Error = error{
+    MessageTooShort,
+    InvalidTokenLength,
     TruncatedOption,
+    EmptyPayload,
 };
 
 pub const Packet = struct {
@@ -97,10 +100,13 @@ pub const Packet = struct {
     alloc: std.mem.Allocator,
 
     pub fn read(alloc: std.mem.Allocator, data: []const u8) !Packet {
+        if (data.len < 4) return Error.MessageTooShort;
         const b0 = data[0];
         const b1 = data[1];
         const msg_id: u16 = @as(u16, data[2]) << 8 | data[3];
         const token_len: usize = b0 & 0xf;
+        if (token_len > 8) return Error.InvalidTokenLength;
+        if (data.len < 4 + token_len) return Error.MessageTooShort;
 
         // Pass 1: count options and compute total data size
         var pos: usize = 4 + token_len;
@@ -112,12 +118,14 @@ pub const Packet = struct {
             const c0 = data[pos];
             pos += 1;
             if (c0 == 0xff) {
+                if (pos == data.len) return Error.EmptyPayload;
                 payload_start = pos;
                 data_size += data.len - pos;
                 break;
             }
             _ = try readVarLenDirect(data, &pos, @intCast(c0 >> 4 & 0xf));
             const val_len = try readVarLenDirect(data, &pos, @intCast(c0 & 0xf));
+            if (pos + val_len > data.len) return Error.TruncatedOption;
             data_size += val_len;
             pos += val_len;
             opt_count += 1;
@@ -267,11 +275,13 @@ fn extendedSize(val: u16) usize {
 fn readVarLenDirect(data: []const u8, pos: *usize, nibble: u4) !u16 {
     return switch (nibble) {
         13 => blk: {
+            if (pos.* >= data.len) return Error.TruncatedOption;
             const v: u16 = data[pos.*];
             pos.* += 1;
             break :blk v + 13;
         },
         14 => blk: {
+            if (pos.* + 1 >= data.len) return Error.TruncatedOption;
             const v: u16 = @as(u16, data[pos.*]) << 8 | data[pos.* + 1];
             pos.* += 2;
             break :blk v + 269;
@@ -742,4 +752,72 @@ test "round-trip with extended option delta" {
     const encoded = try pkt.write();
     defer alloc.free(encoded);
     try std.testing.expectEqualSlices(u8, &msg, encoded);
+}
+
+test "error: empty message" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(Error.MessageTooShort, Packet.read(alloc, &[_]u8{}));
+}
+
+test "error: header too short" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(Error.MessageTooShort, Packet.read(alloc, &[_]u8{0x40}));
+    try std.testing.expectError(Error.MessageTooShort, Packet.read(alloc, &[_]u8{ 0x40, 0x01 }));
+    try std.testing.expectError(Error.MessageTooShort, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00 }));
+}
+
+test "error: invalid token length" {
+    const alloc = std.testing.allocator;
+    // TKL=9 (reserved)
+    try std.testing.expectError(Error.InvalidTokenLength, Packet.read(alloc, &[_]u8{ 0x49, 0x01, 0x00, 0x00 }));
+    // TKL=15 (reserved)
+    try std.testing.expectError(Error.InvalidTokenLength, Packet.read(alloc, &[_]u8{ 0x4F, 0x01, 0x00, 0x00 }));
+}
+
+test "error: token extends past data" {
+    const alloc = std.testing.allocator;
+    // TKL=4 but only 1 byte after header
+    try std.testing.expectError(Error.MessageTooShort, Packet.read(alloc, &[_]u8{ 0x44, 0x01, 0x00, 0x00, 0xAA }));
+}
+
+test "error: truncated 1-byte extended delta" {
+    const alloc = std.testing.allocator;
+    // Option byte: delta nibble=13 (needs 1 ext byte), but no byte follows
+    try std.testing.expectError(Error.TruncatedOption, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0xD0 }));
+}
+
+test "error: truncated 2-byte extended delta" {
+    const alloc = std.testing.allocator;
+    // Option byte: delta nibble=14 (needs 2 ext bytes), but only 1 follows
+    try std.testing.expectError(Error.TruncatedOption, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0xE0, 0x00 }));
+}
+
+test "error: truncated 1-byte extended length" {
+    const alloc = std.testing.allocator;
+    // delta=0 inline, length nibble=13 (needs 1 ext byte), but no byte follows
+    try std.testing.expectError(Error.TruncatedOption, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0x0D }));
+}
+
+test "error: truncated 2-byte extended length" {
+    const alloc = std.testing.allocator;
+    // delta=0 inline, length nibble=14 (needs 2 ext bytes), but only 1 follows
+    try std.testing.expectError(Error.TruncatedOption, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0x0E, 0x00 }));
+}
+
+test "error: option value extends past data" {
+    const alloc = std.testing.allocator;
+    // Option: delta=1, length=5, but only 2 value bytes present
+    try std.testing.expectError(Error.TruncatedOption, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0x15, 0xAA, 0xBB }));
+}
+
+test "error: empty payload after marker" {
+    const alloc = std.testing.allocator;
+    // Payload marker 0xFF with no bytes following
+    try std.testing.expectError(Error.EmptyPayload, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0xFF }));
+}
+
+test "error: empty payload after options" {
+    const alloc = std.testing.allocator;
+    // Option then payload marker with no bytes following
+    try std.testing.expectError(Error.EmptyPayload, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0xB0, 0xFF }));
 }
