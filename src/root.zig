@@ -11,6 +11,7 @@ const MessageKind = enum(u8) {
 };
 
 const Code = enum(u8) {
+    empty = 0,
     get = 1,
     post,
     put,
@@ -63,13 +64,14 @@ const OptionKind = enum(u16) {
     uri_query = 15,
     accept = 17,
     location_query = 20,
-    block1 = 27,
     block2 = 23,
+    block1 = 27,
+    size2 = 28,
     proxy_uri = 35,
     proxy_scheme = 39,
     size1 = 60,
-    size2 = 28,
     no_response = 258,
+    _,
 };
 
 const Option = struct {
@@ -279,55 +281,420 @@ fn readVarLenDirect(data: []const u8, pos: *usize, nibble: u4) !u16 {
     };
 }
 
-test "decode" {
-    const print = std.debug.print;
+test "decode assertions" {
     const alloc = std.testing.allocator;
+    const expectEqual = std.testing.expectEqual;
+    const expectEqualSlices = std.testing.expectEqualSlices;
 
-    print("\n", .{});
-
-    // Bin = <<68,1,186,34,12,83,95,185,184,99,104,101,99,107,95,105,99>>.
+    // msg1: CON GET, msg_id=0xba22, token=4, 2 options (uri_path, uri_path)
     const msg1 = [_]u8{
         0x44, 0x01, 0xba, 0x22, 0x0c, 0x53, 0x5f, 0xb9,
         0xb8, 0x63, 0x68, 0x65, 0x63, 0x6b, 0x5f, 0x69,
         0x63,
     };
-    const packet1 = try Packet.read(alloc, &msg1);
-    defer packet1.deinit();
-    print("packet1: {}\n", .{packet1});
-    for (packet1.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
+    const p1 = try Packet.read(alloc, &msg1);
+    defer p1.deinit();
+    try expectEqual(.confirmable, p1.kind);
+    try expectEqual(.get, p1.code);
+    try expectEqual(@as(u16, 0xba22), p1.msg_id);
+    try expectEqualSlices(u8, &[_]u8{ 0x0c, 0x53, 0x5f, 0xb9 }, p1.token);
+    try expectEqual(@as(usize, 1), p1.options.len);
+    try expectEqual(OptionKind.uri_path, p1.options[0].kind);
+    try expectEqualSlices(u8, "check_ic", p1.options[0].value);
+    try expectEqual(@as(usize, 0), p1.payload.len);
 
-    // Bin = <<68,2,62,111,119,104,82,128,177,49,1,50,1,51,255,100,97,116,97>>.
+    // msg2: CON POST, msg_id=0x3e6f, token=4, 4 options, payload "data"
     const msg2 = [_]u8{
         0x44, 0x02, 0x3e, 0x6f, 0x77, 0x68, 0x52, 0x80,
         0xb1, 0x31, 0x01, 0x32, 0x01, 0x33, 0xff, 0x64,
         0x61, 0x74, 0x61,
     };
-    const packet2 = try Packet.read(alloc, &msg2);
-    defer packet2.deinit();
-    print("packet2: {}\n", .{packet2});
-    for (packet2.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
+    const p2 = try Packet.read(alloc, &msg2);
+    defer p2.deinit();
+    try expectEqual(.confirmable, p2.kind);
+    try expectEqual(.post, p2.code);
+    try expectEqual(@as(u16, 0x3e6f), p2.msg_id);
+    try expectEqual(@as(usize, 3), p2.options.len);
+    try expectEqualSlices(u8, "data", p2.payload);
 
-    // Bin = <<68,1,93,31,0,0,57,116,57,108,111,99,97,108,104,111,115,116,131,116,118,49>>.
+    // msg3: CON GET, uri_host="localhost", uri_path="tv1"
     const msg3 = [_]u8{
         0x44, 0x01, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
         0x39, 0x6C, 0x6F, 0x63, 0x61, 0x6C, 0x68, 0x6F,
         0x73, 0x74, 0x83, 0x74, 0x76, 0x31,
     };
-    const packet3 = try Packet.read(alloc, &msg3);
-    defer packet3.deinit();
-    print("packet3: {}\n", .{packet3});
-    for (packet3.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
+    const p3 = try Packet.read(alloc, &msg3);
+    defer p3.deinit();
+    try expectEqual(.confirmable, p3.kind);
+    try expectEqual(@as(usize, 2), p3.options.len);
+    try expectEqual(OptionKind.uri_host, p3.options[0].kind);
+    try expectEqualSlices(u8, "localhost", p3.options[0].value);
+    try expectEqual(OptionKind.uri_path, p3.options[1].kind);
+    try expectEqualSlices(u8, "tv1", p3.options[1].value);
+    try expectEqual(@as(usize, 0), p3.payload.len);
 
-    // Bin = <<100,69,93,31,0,0,57,116,255,72,101,108,108,111,32,87,111,114,108,100,33>>.
+    // msg4: ACK 2.05 Content, payload "Hello World!"
     const msg4 = [_]u8{
         0x64, 0x45, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
         0xFF, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57,
         0x6F, 0x72, 0x6C, 0x64, 0x21,
     };
-    const packet4 = try Packet.read(alloc, &msg4);
-    defer packet4.deinit();
-    print("packet4: {}\n", .{packet4});
-    for (packet4.options) |opt| print("opt: {any}=>{s}\n", .{ opt.kind, opt.value });
+    const p4 = try Packet.read(alloc, &msg4);
+    defer p4.deinit();
+    try expectEqual(.acknowledgement, p4.kind);
+    try expectEqual(.content, p4.code);
+    try expectEqual(@as(usize, 0), p4.options.len);
+    try expectEqualSlices(u8, "Hello World!", p4.payload);
+
+    // Round-trip all four
+    for ([_][]const u8{ &msg1, &msg2, &msg3, &msg4 }) |msg| {
+        const pkt = try Packet.read(alloc, msg);
+        defer pkt.deinit();
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try expectEqualSlices(u8, msg, enc);
+    }
+}
+
+test "error: truncated option delta" {
+    const alloc = std.testing.allocator;
+    // header: CON GET, tkl=0, msg_id=0, then option byte with delta nibble=15
+    const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00, 0xF0 };
+    try std.testing.expectError(Error.TruncatedOption, Packet.read(alloc, &msg));
+}
+
+test "error: truncated option length" {
+    const alloc = std.testing.allocator;
+    // option byte: delta=0, length nibble=15
+    const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00, 0x0F };
+    try std.testing.expectError(Error.TruncatedOption, Packet.read(alloc, &msg));
+}
+
+test "all message kinds" {
+    const alloc = std.testing.allocator;
+    const kinds = [_]MessageKind{ .confirmable, .non_confirmable, .acknowledgement, .reset };
+    for (kinds, 0..) |kind, i| {
+        var msg = [_]u8{ 0x40, 0x01, 0x00, 0x00 };
+        msg[0] = (1 << 6) | (@as(u8, @intCast(i)) << 4);
+        const pkt = try Packet.read(alloc, &msg);
+        defer pkt.deinit();
+        try std.testing.expectEqual(kind, pkt.kind);
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try std.testing.expectEqualSlices(u8, &msg, enc);
+    }
+}
+
+test "message id boundaries" {
+    const alloc = std.testing.allocator;
+    const ids = [_]u16{ 0x0000, 0xFFFF, 0x0100 };
+    for (ids) |id| {
+        const msg = [_]u8{ 0x40, 0x01, @intCast(id >> 8), @intCast(id & 0xff) };
+        const pkt = try Packet.read(alloc, &msg);
+        defer pkt.deinit();
+        try std.testing.expectEqual(id, pkt.msg_id);
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try std.testing.expectEqualSlices(u8, &msg, enc);
+    }
+}
+
+test "token lengths" {
+    const alloc = std.testing.allocator;
+    const lens = [_]u8{ 0, 1, 2, 4, 8 };
+    for (lens) |tl| {
+        var buf: [12]u8 = undefined;
+        buf[0] = (1 << 6) | tl;
+        buf[1] = 0x01; // GET
+        buf[2] = 0x00;
+        buf[3] = 0x00;
+        for (0..tl) |j| buf[4 + j] = @intCast(j + 0xA0);
+        const msg = buf[0 .. 4 + tl];
+        const pkt = try Packet.read(alloc, msg);
+        defer pkt.deinit();
+        try std.testing.expectEqual(@as(usize, tl), pkt.token.len);
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try std.testing.expectEqualSlices(u8, msg, enc);
+    }
+}
+
+test "response codes" {
+    const alloc = std.testing.allocator;
+    const codes = [_]Code{
+        .empty, .get, .delete, .created, .content, .@"continue",
+        .bad_request, .not_found, .too_many_requests,
+        .internal_server_error, .hop_limit_reached,
+    };
+    for (codes) |code| {
+        const msg = [_]u8{ 0x40, @intFromEnum(code), 0x00, 0x00 };
+        const pkt = try Packet.read(alloc, &msg);
+        defer pkt.deinit();
+        try std.testing.expectEqual(code, pkt.code);
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try std.testing.expectEqualSlices(u8, &msg, enc);
+    }
+}
+
+test "option length boundaries" {
+    const alloc = std.testing.allocator;
+    // lengths: 0, 12 (max inline), 13 (1-byte ext), 268 (1-byte max), 269 (2-byte ext)
+    const lens = [_]u16{ 0, 12, 13, 268, 269 };
+    for (lens) |opt_len| {
+        // Build packet: header(4) + option_header + value
+        const ext_size: usize = if (opt_len <= 12) 0 else if (opt_len < 269) 1 else 2;
+        const total = 4 + 1 + ext_size + opt_len;
+        const buf = try alloc.alloc(u8, total);
+        defer alloc.free(buf);
+        buf[0] = 0x40;
+        buf[1] = 0x01;
+        buf[2] = 0x00;
+        buf[3] = 0x00;
+        // Option: delta=1 (if_match), length=opt_len
+        // delta nibble = 1 (inline)
+        const len_nibble: u8 = if (opt_len <= 12) @intCast(opt_len) else if (opt_len < 269) 13 else 14;
+        buf[4] = (1 << 4) | len_nibble;
+        var pos: usize = 5;
+        if (opt_len >= 13 and opt_len < 269) {
+            buf[pos] = @intCast(opt_len - 13);
+            pos += 1;
+        } else if (opt_len >= 269) {
+            const ext = opt_len - 269;
+            buf[pos] = @intCast(ext >> 8);
+            buf[pos + 1] = @intCast(ext & 0xff);
+            pos += 2;
+        }
+        for (0..opt_len) |j| buf[pos + j] = @intCast(j & 0xff);
+
+        const pkt = try Packet.read(alloc, buf);
+        defer pkt.deinit();
+        try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
+        try std.testing.expectEqual(@as(usize, opt_len), pkt.options[0].value.len);
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try std.testing.expectEqualSlices(u8, buf, enc);
+    }
+}
+
+test "option delta boundaries" {
+    const alloc = std.testing.allocator;
+    // deltas: 1 (inline), 12 (max inline), 13 (1-byte ext), 268 (1-byte max), 269 (2-byte ext)
+    const deltas = [_]u16{ 1, 12, 13, 268, 269 };
+    for (deltas) |delta| {
+        const ext_size: usize = if (delta <= 12) 0 else if (delta < 269) 1 else 2;
+        const total = 4 + 1 + ext_size;
+        const buf = try alloc.alloc(u8, total);
+        defer alloc.free(buf);
+        buf[0] = 0x40;
+        buf[1] = 0x01;
+        buf[2] = 0x00;
+        buf[3] = 0x00;
+        const delta_nibble: u8 = if (delta <= 12) @intCast(delta) else if (delta < 269) 13 else 14;
+        buf[4] = (delta_nibble << 4) | 0; // length=0
+        var pos: usize = 5;
+        if (delta >= 13 and delta < 269) {
+            buf[pos] = @intCast(delta - 13);
+            pos += 1;
+        } else if (delta >= 269) {
+            const ext = delta - 269;
+            buf[pos] = @intCast(ext >> 8);
+            buf[pos + 1] = @intCast(ext & 0xff);
+            pos += 2;
+        }
+
+        const pkt = try Packet.read(alloc, buf);
+        defer pkt.deinit();
+        try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
+        try std.testing.expectEqual(@as(u16, delta), @intFromEnum(pkt.options[0].kind));
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try std.testing.expectEqualSlices(u8, buf, enc);
+    }
+}
+
+test "extended delta and length combined" {
+    const alloc = std.testing.allocator;
+    // Option: delta=300 (2-byte ext), length=300 (2-byte ext)
+    // delta nibble=14, ext=300-269=31; length nibble=14, ext=300-269=31
+    var msg: [4 + 1 + 2 + 2 + 300]u8 = undefined;
+    msg[0] = 0x40;
+    msg[1] = 0x01;
+    msg[2] = 0x00;
+    msg[3] = 0x00;
+    msg[4] = 0xEE; // both nibbles = 14
+    // delta ext = 31 (big-endian)
+    msg[5] = 0x00;
+    msg[6] = 31;
+    // length ext = 31
+    msg[7] = 0x00;
+    msg[8] = 31;
+    for (0..300) |j| msg[9 + j] = @intCast(j & 0xff);
+
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
+    try std.testing.expectEqual(@as(u16, 300), @intFromEnum(pkt.options[0].kind));
+    try std.testing.expectEqual(@as(usize, 300), pkt.options[0].value.len);
+    const enc = try pkt.write();
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "zero-length option values" {
+    const alloc = std.testing.allocator;
+    // if_none_match (5) with zero-length value
+    const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00, 0x50 };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
+    try std.testing.expectEqual(OptionKind.if_none_match, pkt.options[0].kind);
+    try std.testing.expectEqual(@as(usize, 0), pkt.options[0].value.len);
+    const enc = try pkt.write();
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "multiple options with accumulating deltas" {
+    const alloc = std.testing.allocator;
+    // Three uri_path options (delta=11, then 0, 0): "a", "b", "c"
+    const msg = [_]u8{
+        0x40, 0x01, 0x00, 0x00,
+        0xB1, 0x61, // delta=11 (uri_path), len=1, "a"
+        0x01, 0x62, // delta=0 (uri_path again), len=1, "b"
+        0x01, 0x63, // delta=0 (uri_path again), len=1, "c"
+    };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit();
+    try std.testing.expectEqual(@as(usize, 3), pkt.options.len);
+    for (pkt.options) |opt| try std.testing.expectEqual(OptionKind.uri_path, opt.kind);
+    try std.testing.expectEqualSlices(u8, "a", pkt.options[0].value);
+    try std.testing.expectEqualSlices(u8, "b", pkt.options[1].value);
+    try std.testing.expectEqualSlices(u8, "c", pkt.options[2].value);
+    const enc = try pkt.write();
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "option kinds" {
+    const alloc = std.testing.allocator;
+    // All 21 known OptionKind values in ascending order, each with 0-byte value
+    const kind_nums = [_]u16{ 1, 3, 4, 5, 6, 7, 8, 9, 11, 12, 14, 15, 17, 20, 23, 27, 28, 35, 39, 60, 258 };
+    // Build packet: header + 21 option headers with appropriate deltas
+    var buf_arr: [256]u8 = undefined;
+    buf_arr[0] = 0x40;
+    buf_arr[1] = 0x01;
+    buf_arr[2] = 0x00;
+    buf_arr[3] = 0x00;
+    var pos: usize = 4;
+    var prev: u16 = 0;
+    for (kind_nums) |num| {
+        const delta = num - prev;
+        const delta_nibble = optNibble(delta);
+        buf_arr[pos] = (delta_nibble << 4) | 0;
+        pos += 1;
+        writeExtDirect(&buf_arr, &pos, delta);
+        prev = num;
+    }
+    const msg = buf_arr[0..pos];
+
+    const pkt = try Packet.read(alloc, msg);
+    defer pkt.deinit();
+    try std.testing.expectEqual(@as(usize, 21), pkt.options.len);
+    for (pkt.options, 0..) |opt, i| {
+        try std.testing.expectEqual(@as(u16, kind_nums[i]), @intFromEnum(opt.kind));
+    }
+    const enc = try pkt.write();
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, msg, enc);
+}
+
+test "payload edge cases" {
+    const alloc = std.testing.allocator;
+
+    // No payload
+    const msg_no_payload = [_]u8{ 0x40, 0x01, 0x00, 0x00 };
+    const pkt1 = try Packet.read(alloc, &msg_no_payload);
+    defer pkt1.deinit();
+    try std.testing.expectEqual(@as(usize, 0), pkt1.payload.len);
+
+    // 1-byte payload
+    const msg_1byte = [_]u8{ 0x40, 0x01, 0x00, 0x00, 0xFF, 0x42 };
+    const pkt2 = try Packet.read(alloc, &msg_1byte);
+    defer pkt2.deinit();
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x42}, pkt2.payload);
+
+    // Payload after options
+    const msg_opt_payload = [_]u8{
+        0x40, 0x01, 0x00, 0x00,
+        0xB0, // uri_path, len=0
+        0xFF, 0xAA, 0xBB,
+    };
+    const pkt3 = try Packet.read(alloc, &msg_opt_payload);
+    defer pkt3.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pkt3.options.len);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xBB }, pkt3.payload);
+
+    // Round-trip all
+    for ([_][]const u8{ &msg_no_payload, &msg_1byte, &msg_opt_payload }) |msg| {
+        const pkt = try Packet.read(alloc, msg);
+        defer pkt.deinit();
+        const enc = try pkt.write();
+        defer alloc.free(enc);
+        try std.testing.expectEqualSlices(u8, msg, enc);
+    }
+}
+
+test "rfc7641 observe option" {
+    const alloc = std.testing.allocator;
+    // CON GET with Observe option (6) = sequence 1
+    const msg = [_]u8{
+        0x41, 0x01, 0x00, 0x01, 0xAB, // header: tkl=1, token=0xAB
+        0x61, 0x01, // option: delta=6 (observe), len=1, value=0x01
+    };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit();
+    try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
+    try std.testing.expectEqual(OptionKind.observe, pkt.options[0].kind);
+    try std.testing.expectEqualSlices(u8, &[_]u8{0x01}, pkt.options[0].value);
+    const enc = try pkt.write();
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "rfc7959 block options" {
+    const alloc = std.testing.allocator;
+    // CON GET with Block2 (23), Block1 (27), Size2 (28)
+    // Ascending order: 23, 27, 28
+    const msg = [_]u8{
+        0x40, 0x01, 0x00, 0x00,
+        0xD1, 0x0A, 0x06, // delta=23 (ext 10), len=1, value=0x06 (Block2)
+        0x41, 0x15, // delta=4 (->27 Block1), len=1, value=0x15
+        0x12, 0x01, 0x00, // delta=1 (->28 Size2), len=2, value=0x0100
+    };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit();
+    try std.testing.expectEqual(@as(usize, 3), pkt.options.len);
+    try std.testing.expectEqual(OptionKind.block2, pkt.options[0].kind);
+    try std.testing.expectEqual(OptionKind.block1, pkt.options[1].kind);
+    try std.testing.expectEqual(OptionKind.size2, pkt.options[2].kind);
+    const enc = try pkt.write();
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "rfc8516 too many requests" {
+    const alloc = std.testing.allocator;
+    // ACK 4.29 Too Many Requests
+    const msg = [_]u8{ 0x60, 0x9D, 0x00, 0x01 };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit();
+    try std.testing.expectEqual(.acknowledgement, pkt.kind);
+    try std.testing.expectEqual(.too_many_requests, pkt.code);
+    try std.testing.expectEqual(@as(u16, 1), pkt.msg_id);
+    const enc = try pkt.write();
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
 }
 
 test "round-trip" {
