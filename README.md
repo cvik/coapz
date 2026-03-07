@@ -17,7 +17,7 @@ Handles binary CoAP message serialization only -- no transport, no retransmissio
 Add as a Zig package dependency:
 
 ```sh
-zig fetch --save git+https://github.com/YOUR_USER/coapz.git
+zig fetch --save git+https://github.com/cvik/coapz.git
 ```
 
 Then in your `build.zig`:
