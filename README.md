@@ -12,9 +12,24 @@ Handles binary CoAP message serialization only -- no transport, no retransmissio
 - RFC 7959 -- Block-Wise Transfers (option parsing)
 - RFC 8516 -- Too Many Requests Response Code
 
-## Usage
+## Installation
 
-Add as a Zig dependency or vendor `src/root.zig` directly.
+Add as a Zig package dependency:
+
+```sh
+zig fetch --save git+https://github.com/cvik/coapz.git
+```
+
+Then in your `build.zig`:
+
+```zig
+const coapz = b.dependency("coapz", .{});
+exe.root_module.addImport("coapz", coapz.module("coapz"));
+```
+
+Or vendor `src/root.zig` directly.
+
+## Usage
 
 ### Decoding
 
