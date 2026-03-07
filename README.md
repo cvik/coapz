@@ -61,9 +61,9 @@ defer allocator.free(encoded);
 Requires Zig 0.15+.
 
 ```sh
-zig build          # build static library
-zig build test     # run tests
-zig build bench    # run benchmarks
+zig build                              # build static library
+zig build test                         # run tests
+zig build bench -Doptimize=ReleaseFast # run benchmarks
 ```
 
 ## Benchmarks
@@ -72,28 +72,28 @@ AMD Ryzen AI MAX+ 395, 32 threads, 112 GiB RAM, Linux 6.18.9
 
 ```
 Decode:
-  minimal (4B header only)                      740 ns/op     1351046 ops/s
-  small (token + 1 option)                    11726 ns/op       85274 ops/s
-  multi-option (3 opts + payload)             12106 ns/op       82601 ops/s
-  host+path (2 options)                       12039 ns/op       83056 ops/s
-  payload (ACK + 12B body)                     6553 ns/op      152591 ops/s
-  extended delta (opt 258)                    11613 ns/op       86106 ops/s
+  minimal (4B header only)                       25 ns/op    39972777 ops/s
+  small (token + 1 option)                     8963 ns/op      111562 ops/s
+  multi-option (3 opts + payload)              9277 ns/op      107786 ops/s
+  host+path (2 options)                        8955 ns/op      111658 ops/s
+  payload (ACK + 12B body)                     4786 ns/op      208939 ops/s
+  extended delta (opt 258)                     9018 ns/op      110885 ops/s
 
 Encode (read + write):
-  minimal (4B header only)                     7189 ns/op      139097 ops/s
-  small (token + 1 option)                    19860 ns/op       50350 ops/s
-  multi-option (3 opts + payload)             21633 ns/op       46224 ops/s
-  host+path (2 options)                       20731 ns/op       48235 ops/s
-  payload (ACK + 12B body)                    13375 ns/op       74763 ops/s
-  extended delta (opt 258)                    20029 ns/op       49927 ops/s
+  minimal (4B header only)                     4932 ns/op      202749 ops/s
+  small (token + 1 option)                    14993 ns/op       66697 ops/s
+  multi-option (3 opts + payload)             15110 ns/op       66178 ops/s
+  host+path (2 options)                       14790 ns/op       67609 ops/s
+  payload (ACK + 12B body)                     9761 ns/op      102442 ops/s
+  extended delta (opt 258)                    14781 ns/op       67651 ops/s
 
 Round-trip (decode + encode + decode):
-  minimal (4B header only)                     7889 ns/op      126751 ops/s
-  small (token + 1 option)                    31963 ns/op       31286 ops/s
-  multi-option (3 opts + payload)             33938 ns/op       29465 ops/s
-  host+path (2 options)                       33087 ns/op       30222 ops/s
-  payload (ACK + 12B body)                    20028 ns/op       49927 ops/s
-  extended delta (opt 258)                    32007 ns/op       31242 ops/s
+  minimal (4B header only)                     4964 ns/op      201419 ops/s
+  small (token + 1 option)                    24228 ns/op       41273 ops/s
+  multi-option (3 opts + payload)             24685 ns/op       40509 ops/s
+  host+path (2 options)                       24183 ns/op       41351 ops/s
+  payload (ACK + 12B body)                    14755 ns/op       67771 ops/s
+  extended delta (opt 258)                    24164 ns/op       41382 ops/s
 ```
 
 Note: benchmarks use `page_allocator`; real workloads with arena/pool allocators will be significantly faster.
