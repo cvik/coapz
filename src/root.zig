@@ -3,14 +3,16 @@
 const std = @import("std");
 const Big = std.builtin.Endian.big;
 
-const MessageKind = enum(u8) {
+/// CoAP message type (CON, NON, ACK, RST).
+pub const MessageKind = enum(u8) {
     confirmable = 0,
     non_confirmable = 1,
     acknowledgement = 2,
     reset = 3,
 };
 
-const Code = enum(u8) {
+/// CoAP method or response code.
+pub const Code = enum(u8) {
     empty = 0,
     get = 1,
     post,
@@ -48,7 +50,8 @@ const Code = enum(u8) {
     hop_limit_reached = 168,
 };
 
-const OptionKind = enum(u16) {
+/// CoAP option number. Supports all options from RFC 7252, 7641, 7959, and 8516.
+pub const OptionKind = enum(u16) {
     unknown = 0,
     if_match = 1,
     uri_host = 3,
@@ -74,18 +77,22 @@ const OptionKind = enum(u16) {
     _,
 };
 
-const Option = struct {
+/// A single CoAP option (number + opaque value).
+pub const Option = struct {
     kind: OptionKind,
     value: []const u8,
 };
 
-const Error = error{
+/// Errors returned when decoding a malformed CoAP packet.
+pub const Error = error{
     MessageTooShort,
     InvalidTokenLength,
     TruncatedOption,
     EmptyPayload,
 };
 
+/// Decoded CoAP packet. Owns its token, option values, and payload through
+/// a single backing buffer. Call `deinit()` to free.
 pub const Packet = struct {
     const Self = @This();
 
@@ -99,6 +106,7 @@ pub const Packet = struct {
 
     alloc: std.mem.Allocator,
 
+    /// Decode a CoAP packet from raw bytes. Returns `Error` on malformed input.
     pub fn read(alloc: std.mem.Allocator, data: []const u8) !Packet {
         if (data.len < 4) return Error.MessageTooShort;
         const b0 = data[0];
@@ -180,6 +188,7 @@ pub const Packet = struct {
         };
     }
 
+    /// Encode the packet to CoAP wire format. Caller owns the returned slice.
     pub fn write(self: Self) ![]u8 {
         // Calculate exact output size
         var size: usize = 4 + self.token.len;
@@ -236,6 +245,7 @@ pub const Packet = struct {
         return buf;
     }
 
+    /// Free the backing buffer and options array.
     pub fn deinit(self: Self) void {
         self.alloc.free(self._data_buf);
         self.alloc.free(self.options);
