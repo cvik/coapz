@@ -1,14 +1,14 @@
 ## coapz - Constrained Application Protocol (CoAP) encode/decode library for Zig
 
-Currently only an embryo for such a library.
+A minimal CoAP packet encode/decode library for Zig.
 
-Supports read, but now write of CoAP-packets.
+Supports reading and writing of CoAP packets with a two-pass decode and pre-sized encode for efficiency.
 
 ### Todo
 - [X] Rename all fields named `typ` to `kind` (or similar)
-- [ ] Implement `Packet.write(self: Self) ![]u8`
-      + ..or: `Packet.write(self: Self, out: anytype) !void`
-- [ ] Write actual test suits for reading and writing
+- [X] Implement `Packet.write(self: Self) ![]u8`
+- [ ] Write actual test suites for reading and writing
+      + Current tests cover basic decode and round-trip; need more comprehensive coverage
 - [ ] Create a proper ErrorSet for all types of errors
       + make them explicit instead of just bubbling
       + handle reader errors
@@ -16,7 +16,7 @@ Supports read, but now write of CoAP-packets.
       + Just follow the trys
 - [ ] Test against ecoap (erlang library)
       + Use ecoap to generate lot's of examples
-- [ ] Check which standards exist and which to Implement
+- [ ] Check which standards exist and which to implement
       + Document which RFCs are implemented etc. (see coap-lite crate)
 
 ### RFCs
