@@ -55,7 +55,7 @@ defer pkt.deinit();
 ### Encoding
 
 ```zig
-const encoded = try pkt.write();
+const encoded = try pkt.write(allocator);
 defer allocator.free(encoded);
 // encoded is a freshly allocated []u8 containing the CoAP wire format
 ```
@@ -67,9 +67,11 @@ defer allocator.free(encoded);
 | Error                | Condition                                       |
 |----------------------|-------------------------------------------------|
 | `MessageTooShort`    | Data shorter than 4-byte header or declared TKL |
+| `InvalidVersion`     | Version field is not 1 (per RFC 7252 §3)        |
 | `InvalidTokenLength` | TKL field is 9--15 (reserved per RFC 7252)      |
 | `TruncatedOption`    | Option delta/length nibble 15, or truncated extended bytes / value |
 | `EmptyPayload`       | Payload marker `0xFF` with no bytes following   |
+| `UnsortedOptions`    | Options not in ascending order (encoding only)  |
 
 ## Build
 
