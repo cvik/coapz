@@ -90,39 +90,39 @@ const doNotOptimize = std.mem.doNotOptimizeAway;
 
 fn decodeBench(comptime msg: []const u8) fn () void {
     return struct {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         fn run() void {
-            const alloc = std.heap.page_allocator;
+            _ = arena.reset(.retain_capacity);
+            const alloc = arena.allocator();
             const pkt = Packet.read(alloc, msg) catch unreachable;
             doNotOptimize(pkt);
-            pkt.deinit();
         }
     }.run;
 }
 
 fn encodeBench(comptime msg: []const u8) fn () void {
     return struct {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         fn run() void {
-            const alloc = std.heap.page_allocator;
+            _ = arena.reset(.retain_capacity);
+            const alloc = arena.allocator();
             const pkt = Packet.read(alloc, msg) catch unreachable;
             const encoded = pkt.write() catch unreachable;
             doNotOptimize(encoded);
-            alloc.free(encoded);
-            pkt.deinit();
         }
     }.run;
 }
 
 fn roundtripBench(comptime msg: []const u8) fn () void {
     return struct {
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         fn run() void {
-            const alloc = std.heap.page_allocator;
+            _ = arena.reset(.retain_capacity);
+            const alloc = arena.allocator();
             const pkt = Packet.read(alloc, msg) catch unreachable;
             const encoded = pkt.write() catch unreachable;
             const pkt2 = Packet.read(alloc, encoded) catch unreachable;
             doNotOptimize(pkt2);
-            pkt2.deinit();
-            alloc.free(encoded);
-            pkt.deinit();
         }
     }.run;
 }

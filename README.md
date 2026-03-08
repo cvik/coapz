@@ -87,28 +87,28 @@ AMD Ryzen AI MAX+ 395, 32 threads, 112 GiB RAM, Linux 6.18.9
 
 ```
 Decode:
-  minimal (4B header only)                       25 ns/op    39972777 ops/s
-  small (token + 1 option)                     8963 ns/op      111562 ops/s
-  multi-option (3 opts + payload)              9277 ns/op      107786 ops/s
-  host+path (2 options)                        8955 ns/op      111658 ops/s
-  payload (ACK + 12B body)                     4786 ns/op      208939 ops/s
-  extended delta (opt 258)                     9018 ns/op      110885 ops/s
+  minimal (4B header only)                       26 ns/op    37546680 ops/s
+  small (token + 1 option)                       90 ns/op    10989830 ops/s
+  multi-option (3 opts + payload)               190 ns/op     5260000 ops/s
+  host+path (2 options)                         138 ns/op     7198226 ops/s
+  payload (ACK + 12B body)                       38 ns/op    26128314 ops/s
+  extended delta (opt 258)                       86 ns/op    11540017 ops/s
 
 Encode (read + write):
-  minimal (4B header only)                     4932 ns/op      202749 ops/s
-  small (token + 1 option)                    14993 ns/op       66697 ops/s
-  multi-option (3 opts + payload)             15110 ns/op       66178 ops/s
-  host+path (2 options)                       14790 ns/op       67609 ops/s
-  payload (ACK + 12B body)                     9761 ns/op      102442 ops/s
-  extended delta (opt 258)                    14781 ns/op       67651 ops/s
+  minimal (4B header only)                       32 ns/op    30992027 ops/s
+  small (token + 1 option)                      106 ns/op     9370659 ops/s
+  multi-option (3 opts + payload)               216 ns/op     4628666 ops/s
+  host+path (2 options)                         159 ns/op     6265900 ops/s
+  payload (ACK + 12B body)                       46 ns/op    21709709 ops/s
+  extended delta (opt 258)                      104 ns/op     9615095 ops/s
 
 Round-trip (decode + encode + decode):
-  minimal (4B header only)                     4964 ns/op      201419 ops/s
-  small (token + 1 option)                    24228 ns/op       41273 ops/s
-  multi-option (3 opts + payload)             24685 ns/op       40509 ops/s
-  host+path (2 options)                       24183 ns/op       41351 ops/s
-  payload (ACK + 12B body)                    14755 ns/op       67771 ops/s
-  extended delta (opt 258)                    24164 ns/op       41382 ops/s
+  minimal (4B header only)                       58 ns/op    17071762 ops/s
+  small (token + 1 option)                      195 ns/op     5105325 ops/s
+  multi-option (3 opts + payload)               404 ns/op     2471514 ops/s
+  host+path (2 options)                         296 ns/op     3370795 ops/s
+  payload (ACK + 12B body)                       76 ns/op    13025843 ops/s
+  extended delta (opt 258)                      188 ns/op     5294927 ops/s
 ```
 
-Note: benchmarks use `page_allocator`; real workloads with arena/pool allocators will be significantly faster.
+Benchmarks use `ArenaAllocator` with retained capacity (reset per iteration, no syscalls after warmup).
