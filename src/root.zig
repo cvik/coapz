@@ -1,7 +1,6 @@
 //! Constrained Application Protocol (CoAP) encode/decode library
 //!
 const std = @import("std");
-const Big = std.builtin.Endian.big;
 
 /// CoAP message type (CON, NON, ACK, RST).
 pub const MessageKind = enum(u8) {
@@ -48,6 +47,7 @@ pub const Code = enum(u8) {
     gateway_timeout,
     proxying_not_supported,
     hop_limit_reached = 168,
+    _,
 };
 
 /// CoAP option number. Supports all options from RFC 7252, 7641, 7959, and 8516.
@@ -83,33 +83,33 @@ pub const Option = struct {
     value: []const u8,
 };
 
-/// Errors returned when decoding a malformed CoAP packet.
+/// Errors returned when decoding/encoding a malformed CoAP packet.
 pub const Error = error{
     MessageTooShort,
+    InvalidVersion,
     InvalidTokenLength,
     TruncatedOption,
     EmptyPayload,
+    UnsortedOptions,
+    OutOfMemory,
 };
 
 /// Decoded CoAP packet. Owns its token, option values, and payload through
 /// a single backing buffer. Call `deinit()` to free.
 pub const Packet = struct {
-    const Self = @This();
-
     kind: MessageKind,
     code: Code,
     msg_id: u16,
     token: []const u8,
     options: []Option,
     payload: []const u8,
-    _data_buf: []u8,
-
-    alloc: std.mem.Allocator,
+    data_buf: []u8,
 
     /// Decode a CoAP packet from raw bytes. Returns `Error` on malformed input.
-    pub fn read(alloc: std.mem.Allocator, data: []const u8) !Packet {
+    pub fn read(alloc: std.mem.Allocator, data: []const u8) Error!Packet {
         if (data.len < 4) return Error.MessageTooShort;
         const b0 = data[0];
+        if (b0 >> 6 != 1) return Error.InvalidVersion;
         const b1 = data[1];
         const msg_id: u16 = @as(u16, data[2]) << 8 | data[3];
         const token_len: usize = b0 & 0xf;
@@ -131,8 +131,8 @@ pub const Packet = struct {
                 data_size += data.len - pos;
                 break;
             }
-            _ = try readVarLenDirect(data, &pos, @intCast(c0 >> 4 & 0xf));
-            const val_len = try readVarLenDirect(data, &pos, @intCast(c0 & 0xf));
+            _ = try readVarLen(data, &pos, @intCast(c0 >> 4 & 0xf));
+            const val_len = try readVarLen(data, &pos, @intCast(c0 & 0xf));
             if (pos + val_len > data.len) return Error.TruncatedOption;
             data_size += val_len;
             pos += val_len;
@@ -140,9 +140,9 @@ pub const Packet = struct {
         }
 
         // Pass 2: allocate and populate
-        const data_buf = try alloc.alloc(u8, data_size);
+        const data_buf = alloc.alloc(u8, data_size) catch return Error.OutOfMemory;
         errdefer alloc.free(data_buf);
-        const options = try alloc.alloc(Option, opt_count);
+        const options = alloc.alloc(Option, opt_count) catch return Error.OutOfMemory;
         errdefer alloc.free(options);
 
         // Copy token
@@ -153,15 +153,15 @@ pub const Packet = struct {
 
         // Parse and copy options
         pos = 4 + token_len;
-        var delta_sum: u16 = 0;
+        var delta_sum: u32 = 0;
         for (options) |*opt| {
             const c0 = data[pos];
             pos += 1;
-            delta_sum += try readVarLenDirect(data, &pos, @intCast(c0 >> 4 & 0xf));
-            const val_len = try readVarLenDirect(data, &pos, @intCast(c0 & 0xf));
+            delta_sum += try readVarLen(data, &pos, @intCast(c0 >> 4 & 0xf));
+            const val_len = try readVarLen(data, &pos, @intCast(c0 & 0xf));
             @memcpy(data_buf[buf_pos .. buf_pos + val_len], data[pos .. pos + val_len]);
             opt.* = .{
-                .kind = @enumFromInt(delta_sum),
+                .kind = @enumFromInt(@as(u16, @intCast(delta_sum))),
                 .value = data_buf[buf_pos .. buf_pos + val_len],
             };
             buf_pos += val_len;
@@ -177,24 +177,24 @@ pub const Packet = struct {
         }
 
         return .{
-            .alloc = alloc,
             .kind = @enumFromInt(b0 >> 4 & 0x3),
             .code = @enumFromInt(b1),
             .msg_id = msg_id,
             .token = token,
             .options = options,
             .payload = payload,
-            ._data_buf = data_buf,
+            .data_buf = data_buf,
         };
     }
 
     /// Encode the packet to CoAP wire format. Caller owns the returned slice.
-    pub fn write(self: Self) ![]u8 {
+    pub fn write(self: Packet, allocator: std.mem.Allocator) Error![]u8 {
         // Calculate exact output size
         var size: usize = 4 + self.token.len;
         var prev: u16 = 0;
         for (self.options) |opt| {
             const num = @intFromEnum(opt.kind);
+            if (num < prev) return Error.UnsortedOptions;
             const delta = num - prev;
             const len: u16 = @intCast(opt.value.len);
             size += 1 + extendedSize(delta) + extendedSize(len) + opt.value.len;
@@ -205,8 +205,8 @@ pub const Packet = struct {
         }
 
         // Single allocation
-        const buf = try self.alloc.alloc(u8, size);
-        errdefer self.alloc.free(buf);
+        const buf = allocator.alloc(u8, size) catch return Error.OutOfMemory;
+        errdefer allocator.free(buf);
 
         // Header
         const token_len: u8 = @intCast(self.token.len);
@@ -228,8 +228,8 @@ pub const Packet = struct {
             const len: u16 = @intCast(opt.value.len);
             buf[pos] = (optNibble(delta) << 4) | optNibble(len);
             pos += 1;
-            writeExtDirect(buf, &pos, delta);
-            writeExtDirect(buf, &pos, len);
+            writeExtended(buf, &pos, delta);
+            writeExtended(buf, &pos, len);
             @memcpy(buf[pos .. pos + opt.value.len], opt.value);
             pos += opt.value.len;
             prev = num;
@@ -246,9 +246,9 @@ pub const Packet = struct {
     }
 
     /// Free the backing buffer and options array.
-    pub fn deinit(self: Self) void {
-        self.alloc.free(self._data_buf);
-        self.alloc.free(self.options);
+    pub fn deinit(self: Packet, allocator: std.mem.Allocator) void {
+        allocator.free(self.data_buf);
+        allocator.free(self.options);
     }
 };
 
@@ -258,7 +258,7 @@ fn optNibble(val: u16) u8 {
     return 14;
 }
 
-fn writeExtDirect(buf: []u8, pos: *usize, val: u16) void {
+fn writeExtended(buf: []u8, pos: *usize, val: u16) void {
     switch (optNibble(val)) {
         13 => {
             buf[pos.*] = @intCast(val - 13);
@@ -282,7 +282,7 @@ fn extendedSize(val: u16) usize {
     };
 }
 
-fn readVarLenDirect(data: []const u8, pos: *usize, nibble: u4) !u16 {
+fn readVarLen(data: []const u8, pos: *usize, nibble: u4) Error!u16 {
     return switch (nibble) {
         13 => blk: {
             if (pos.* >= data.len) return Error.TruncatedOption;
@@ -294,7 +294,7 @@ fn readVarLenDirect(data: []const u8, pos: *usize, nibble: u4) !u16 {
             if (pos.* + 1 >= data.len) return Error.TruncatedOption;
             const v: u16 = @as(u16, data[pos.*]) << 8 | data[pos.* + 1];
             pos.* += 2;
-            break :blk v + 269;
+            break :blk std.math.add(u16, v, 269) catch return Error.TruncatedOption;
         },
         15 => Error.TruncatedOption,
         else => nibble,
@@ -313,7 +313,7 @@ test "decode assertions" {
         0x63,
     };
     const p1 = try Packet.read(alloc, &msg1);
-    defer p1.deinit();
+    defer p1.deinit(alloc);
     try expectEqual(.confirmable, p1.kind);
     try expectEqual(.get, p1.code);
     try expectEqual(@as(u16, 0xba22), p1.msg_id);
@@ -330,7 +330,7 @@ test "decode assertions" {
         0x61, 0x74, 0x61,
     };
     const p2 = try Packet.read(alloc, &msg2);
-    defer p2.deinit();
+    defer p2.deinit(alloc);
     try expectEqual(.confirmable, p2.kind);
     try expectEqual(.post, p2.code);
     try expectEqual(@as(u16, 0x3e6f), p2.msg_id);
@@ -344,7 +344,7 @@ test "decode assertions" {
         0x73, 0x74, 0x83, 0x74, 0x76, 0x31,
     };
     const p3 = try Packet.read(alloc, &msg3);
-    defer p3.deinit();
+    defer p3.deinit(alloc);
     try expectEqual(.confirmable, p3.kind);
     try expectEqual(@as(usize, 2), p3.options.len);
     try expectEqual(OptionKind.uri_host, p3.options[0].kind);
@@ -360,7 +360,7 @@ test "decode assertions" {
         0x6F, 0x72, 0x6C, 0x64, 0x21,
     };
     const p4 = try Packet.read(alloc, &msg4);
-    defer p4.deinit();
+    defer p4.deinit(alloc);
     try expectEqual(.acknowledgement, p4.kind);
     try expectEqual(.content, p4.code);
     try expectEqual(@as(usize, 0), p4.options.len);
@@ -369,8 +369,8 @@ test "decode assertions" {
     // Round-trip all four
     for ([_][]const u8{ &msg1, &msg2, &msg3, &msg4 }) |msg| {
         const pkt = try Packet.read(alloc, msg);
-        defer pkt.deinit();
-        const enc = try pkt.write();
+        defer pkt.deinit(alloc);
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try expectEqualSlices(u8, msg, enc);
     }
@@ -397,9 +397,9 @@ test "all message kinds" {
         var msg = [_]u8{ 0x40, 0x01, 0x00, 0x00 };
         msg[0] = (1 << 6) | (@as(u8, @intCast(i)) << 4);
         const pkt = try Packet.read(alloc, &msg);
-        defer pkt.deinit();
+        defer pkt.deinit(alloc);
         try std.testing.expectEqual(kind, pkt.kind);
-        const enc = try pkt.write();
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try std.testing.expectEqualSlices(u8, &msg, enc);
     }
@@ -411,9 +411,9 @@ test "message id boundaries" {
     for (ids) |id| {
         const msg = [_]u8{ 0x40, 0x01, @intCast(id >> 8), @intCast(id & 0xff) };
         const pkt = try Packet.read(alloc, &msg);
-        defer pkt.deinit();
+        defer pkt.deinit(alloc);
         try std.testing.expectEqual(id, pkt.msg_id);
-        const enc = try pkt.write();
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try std.testing.expectEqualSlices(u8, &msg, enc);
     }
@@ -431,9 +431,9 @@ test "token lengths" {
         for (0..tl) |j| buf[4 + j] = @intCast(j + 0xA0);
         const msg = buf[0 .. 4 + tl];
         const pkt = try Packet.read(alloc, msg);
-        defer pkt.deinit();
+        defer pkt.deinit(alloc);
         try std.testing.expectEqual(@as(usize, tl), pkt.token.len);
-        const enc = try pkt.write();
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try std.testing.expectEqualSlices(u8, msg, enc);
     }
@@ -449,9 +449,9 @@ test "response codes" {
     for (codes) |code| {
         const msg = [_]u8{ 0x40, @intFromEnum(code), 0x00, 0x00 };
         const pkt = try Packet.read(alloc, &msg);
-        defer pkt.deinit();
+        defer pkt.deinit(alloc);
         try std.testing.expectEqual(code, pkt.code);
-        const enc = try pkt.write();
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try std.testing.expectEqualSlices(u8, &msg, enc);
     }
@@ -488,10 +488,10 @@ test "option length boundaries" {
         for (0..opt_len) |j| buf[pos + j] = @intCast(j & 0xff);
 
         const pkt = try Packet.read(alloc, buf);
-        defer pkt.deinit();
+        defer pkt.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
         try std.testing.expectEqual(@as(usize, opt_len), pkt.options[0].value.len);
-        const enc = try pkt.write();
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try std.testing.expectEqualSlices(u8, buf, enc);
     }
@@ -524,10 +524,10 @@ test "option delta boundaries" {
         }
 
         const pkt = try Packet.read(alloc, buf);
-        defer pkt.deinit();
+        defer pkt.deinit(alloc);
         try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
         try std.testing.expectEqual(@as(u16, delta), @intFromEnum(pkt.options[0].kind));
-        const enc = try pkt.write();
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try std.testing.expectEqualSlices(u8, buf, enc);
     }
@@ -552,11 +552,11 @@ test "extended delta and length combined" {
     for (0..300) |j| msg[9 + j] = @intCast(j & 0xff);
 
     const pkt = try Packet.read(alloc, &msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
     try std.testing.expectEqual(@as(u16, 300), @intFromEnum(pkt.options[0].kind));
     try std.testing.expectEqual(@as(usize, 300), pkt.options[0].value.len);
-    const enc = try pkt.write();
+    const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, &msg, enc);
 }
@@ -566,11 +566,11 @@ test "zero-length option values" {
     // if_none_match (5) with zero-length value
     const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00, 0x50 };
     const pkt = try Packet.read(alloc, &msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
     try std.testing.expectEqual(OptionKind.if_none_match, pkt.options[0].kind);
     try std.testing.expectEqual(@as(usize, 0), pkt.options[0].value.len);
-    const enc = try pkt.write();
+    const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, &msg, enc);
 }
@@ -585,13 +585,13 @@ test "multiple options with accumulating deltas" {
         0x01, 0x63, // delta=0 (uri_path again), len=1, "c"
     };
     const pkt = try Packet.read(alloc, &msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 3), pkt.options.len);
     for (pkt.options) |opt| try std.testing.expectEqual(OptionKind.uri_path, opt.kind);
     try std.testing.expectEqualSlices(u8, "a", pkt.options[0].value);
     try std.testing.expectEqualSlices(u8, "b", pkt.options[1].value);
     try std.testing.expectEqualSlices(u8, "c", pkt.options[2].value);
-    const enc = try pkt.write();
+    const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, &msg, enc);
 }
@@ -613,18 +613,18 @@ test "option kinds" {
         const delta_nibble = optNibble(delta);
         buf_arr[pos] = (delta_nibble << 4) | 0;
         pos += 1;
-        writeExtDirect(&buf_arr, &pos, delta);
+        writeExtended(&buf_arr, &pos, delta);
         prev = num;
     }
     const msg = buf_arr[0..pos];
 
     const pkt = try Packet.read(alloc, msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 21), pkt.options.len);
     for (pkt.options, 0..) |opt, i| {
         try std.testing.expectEqual(@as(u16, kind_nums[i]), @intFromEnum(opt.kind));
     }
-    const enc = try pkt.write();
+    const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, msg, enc);
 }
@@ -635,13 +635,13 @@ test "payload edge cases" {
     // No payload
     const msg_no_payload = [_]u8{ 0x40, 0x01, 0x00, 0x00 };
     const pkt1 = try Packet.read(alloc, &msg_no_payload);
-    defer pkt1.deinit();
+    defer pkt1.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), pkt1.payload.len);
 
     // 1-byte payload
     const msg_1byte = [_]u8{ 0x40, 0x01, 0x00, 0x00, 0xFF, 0x42 };
     const pkt2 = try Packet.read(alloc, &msg_1byte);
-    defer pkt2.deinit();
+    defer pkt2.deinit(alloc);
     try std.testing.expectEqualSlices(u8, &[_]u8{0x42}, pkt2.payload);
 
     // Payload after options
@@ -651,15 +651,15 @@ test "payload edge cases" {
         0xFF, 0xAA, 0xBB,
     };
     const pkt3 = try Packet.read(alloc, &msg_opt_payload);
-    defer pkt3.deinit();
+    defer pkt3.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), pkt3.options.len);
     try std.testing.expectEqualSlices(u8, &[_]u8{ 0xAA, 0xBB }, pkt3.payload);
 
     // Round-trip all
     for ([_][]const u8{ &msg_no_payload, &msg_1byte, &msg_opt_payload }) |msg| {
         const pkt = try Packet.read(alloc, msg);
-        defer pkt.deinit();
-        const enc = try pkt.write();
+        defer pkt.deinit(alloc);
+        const enc = try pkt.write(alloc);
         defer alloc.free(enc);
         try std.testing.expectEqualSlices(u8, msg, enc);
     }
@@ -673,11 +673,11 @@ test "rfc7641 observe option" {
         0x61, 0x01, // option: delta=6 (observe), len=1, value=0x01
     };
     const pkt = try Packet.read(alloc, &msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), pkt.options.len);
     try std.testing.expectEqual(OptionKind.observe, pkt.options[0].kind);
     try std.testing.expectEqualSlices(u8, &[_]u8{0x01}, pkt.options[0].value);
-    const enc = try pkt.write();
+    const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, &msg, enc);
 }
@@ -693,12 +693,12 @@ test "rfc7959 block options" {
         0x12, 0x01, 0x00, // delta=1 (->28 Size2), len=2, value=0x0100
     };
     const pkt = try Packet.read(alloc, &msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 3), pkt.options.len);
     try std.testing.expectEqual(OptionKind.block2, pkt.options[0].kind);
     try std.testing.expectEqual(OptionKind.block1, pkt.options[1].kind);
     try std.testing.expectEqual(OptionKind.size2, pkt.options[2].kind);
-    const enc = try pkt.write();
+    const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, &msg, enc);
 }
@@ -708,11 +708,11 @@ test "rfc8516 too many requests" {
     // ACK 4.29 Too Many Requests
     const msg = [_]u8{ 0x60, 0x9D, 0x00, 0x01 };
     const pkt = try Packet.read(alloc, &msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
     try std.testing.expectEqual(.acknowledgement, pkt.kind);
     try std.testing.expectEqual(.too_many_requests, pkt.code);
     try std.testing.expectEqual(@as(u16, 1), pkt.msg_id);
-    const enc = try pkt.write();
+    const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, &msg, enc);
 }
@@ -733,8 +733,8 @@ test "round-trip" {
 
     for (messages) |msg| {
         const pkt = try Packet.read(alloc, msg);
-        defer pkt.deinit();
-        const encoded = try pkt.write();
+        defer pkt.deinit(alloc);
+        const encoded = try pkt.write(alloc);
         defer alloc.free(encoded);
         try std.testing.expectEqualSlices(u8, msg, encoded);
     }
@@ -749,7 +749,7 @@ test "round-trip with extended option delta" {
     const msg = [_]u8{ 0x40, 0x01, 0x00, 0x01, 0xD1, 0xF5, 0x02 };
 
     const pkt = try Packet.read(alloc, &msg);
-    defer pkt.deinit();
+    defer pkt.deinit(alloc);
 
     try std.testing.expectEqual(.confirmable, pkt.kind);
     try std.testing.expectEqual(.get, pkt.code);
@@ -759,7 +759,7 @@ test "round-trip with extended option delta" {
     try std.testing.expectEqual(.no_response, pkt.options[0].kind);
     try std.testing.expectEqualSlices(u8, &[_]u8{0x02}, pkt.options[0].value);
 
-    const encoded = try pkt.write();
+    const encoded = try pkt.write(alloc);
     defer alloc.free(encoded);
     try std.testing.expectEqualSlices(u8, &msg, encoded);
 }
@@ -830,4 +830,47 @@ test "error: empty payload after options" {
     const alloc = std.testing.allocator;
     // Option then payload marker with no bytes following
     try std.testing.expectError(Error.EmptyPayload, Packet.read(alloc, &[_]u8{ 0x40, 0x01, 0x00, 0x00, 0xB0, 0xFF }));
+}
+
+test "error: invalid version" {
+    const alloc = std.testing.allocator;
+    // Version 0 (0x00 in top 2 bits)
+    try std.testing.expectError(Error.InvalidVersion, Packet.read(alloc, &[_]u8{ 0x00, 0x01, 0x00, 0x00 }));
+    // Version 2 (0x80 in top 2 bits)
+    try std.testing.expectError(Error.InvalidVersion, Packet.read(alloc, &[_]u8{ 0x80, 0x01, 0x00, 0x00 }));
+    // Version 3 (0xC0 in top 2 bits)
+    try std.testing.expectError(Error.InvalidVersion, Packet.read(alloc, &[_]u8{ 0xC0, 0x01, 0x00, 0x00 }));
+}
+
+test "unknown response code round-trip" {
+    const alloc = std.testing.allocator;
+    // Code byte 0x08 is unassigned but valid on the wire
+    const msg = [_]u8{ 0x40, 0x08, 0x00, 0x00 };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit(alloc);
+    try std.testing.expectEqual(@as(u8, 0x08), @intFromEnum(pkt.code));
+    const enc = try pkt.write(alloc);
+    defer alloc.free(enc);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "error: unsorted options in write" {
+    const alloc = std.testing.allocator;
+    // Construct a packet with unsorted options
+    const data_buf = try alloc.alloc(u8, 0);
+    defer alloc.free(data_buf);
+    var opts = [_]Option{
+        .{ .kind = .uri_path, .value = &.{} },
+        .{ .kind = .uri_host, .value = &.{} }, // uri_host(3) < uri_path(11)
+    };
+    const pkt = Packet{
+        .kind = .confirmable,
+        .code = .get,
+        .msg_id = 0,
+        .token = &.{},
+        .options = &opts,
+        .payload = &.{},
+        .data_buf = data_buf,
+    };
+    try std.testing.expectError(Error.UnsortedOptions, pkt.write(alloc));
 }

@@ -42,7 +42,7 @@ const data = [_]u8{
 };
 
 const pkt = try coap.Packet.read(allocator, &data);
-defer pkt.deinit();
+defer pkt.deinit(allocator);
 
 // pkt.kind     == .confirmable
 // pkt.code     == .get
@@ -55,7 +55,7 @@ defer pkt.deinit();
 ### Encoding
 
 ```zig
-const encoded = try pkt.write();
+const encoded = try pkt.write(allocator);
 defer allocator.free(encoded);
 // encoded is a freshly allocated []u8 containing the CoAP wire format
 ```
@@ -67,9 +67,11 @@ defer allocator.free(encoded);
 | Error                | Condition                                       |
 |----------------------|-------------------------------------------------|
 | `MessageTooShort`    | Data shorter than 4-byte header or declared TKL |
+| `InvalidVersion`     | Version field is not 1 (per RFC 7252 §3)        |
 | `InvalidTokenLength` | TKL field is 9--15 (reserved per RFC 7252)      |
 | `TruncatedOption`    | Option delta/length nibble 15, or truncated extended bytes / value |
 | `EmptyPayload`       | Payload marker `0xFF` with no bytes following   |
+| `UnsortedOptions`    | Options not in ascending order (encoding only)  |
 
 ## Build
 
@@ -87,28 +89,28 @@ AMD Ryzen AI MAX+ 395, 32 threads, 112 GiB RAM, Linux 6.18.9
 
 ```
 Decode:
-  minimal (4B header only)                       26 ns/op    37546680 ops/s
-  small (token + 1 option)                       90 ns/op    10989830 ops/s
-  multi-option (3 opts + payload)               190 ns/op     5260000 ops/s
-  host+path (2 options)                         138 ns/op     7198226 ops/s
-  payload (ACK + 12B body)                       38 ns/op    26128314 ops/s
-  extended delta (opt 258)                       86 ns/op    11540017 ops/s
+  minimal (4B header only)                       16 ns/op    62154070 ops/s
+  small (token + 1 option)                       35 ns/op    28215709 ops/s
+  multi-option (3 opts + payload)                66 ns/op    15066762 ops/s
+  host+path (2 options)                          50 ns/op    19986943 ops/s
+  payload (ACK + 12B body)                       25 ns/op    38955629 ops/s
+  extended delta (opt 258)                       34 ns/op    29074014 ops/s
 
 Encode (read + write):
-  minimal (4B header only)                       32 ns/op    30992027 ops/s
-  small (token + 1 option)                      106 ns/op     9370659 ops/s
-  multi-option (3 opts + payload)               216 ns/op     4628666 ops/s
-  host+path (2 options)                         159 ns/op     6265900 ops/s
-  payload (ACK + 12B body)                       46 ns/op    21709709 ops/s
-  extended delta (opt 258)                      104 ns/op     9615095 ops/s
+  minimal (4B header only)                       16 ns/op    61655540 ops/s
+  small (token + 1 option)                       39 ns/op    25337057 ops/s
+  multi-option (3 opts + payload)                72 ns/op    13819127 ops/s
+  host+path (2 options)                          56 ns/op    17744944 ops/s
+  payload (ACK + 12B body)                       25 ns/op    39308928 ops/s
+  extended delta (opt 258)                       38 ns/op    26017315 ops/s
 
 Round-trip (decode + encode + decode):
-  minimal (4B header only)                       58 ns/op    17071762 ops/s
-  small (token + 1 option)                      195 ns/op     5105325 ops/s
-  multi-option (3 opts + payload)               404 ns/op     2471514 ops/s
-  host+path (2 options)                         296 ns/op     3370795 ops/s
-  payload (ACK + 12B body)                       76 ns/op    13025843 ops/s
-  extended delta (opt 258)                      188 ns/op     5294927 ops/s
+  minimal (4B header only)                       28 ns/op    35168467 ops/s
+  small (token + 1 option)                       72 ns/op    13789785 ops/s
+  multi-option (3 opts + payload)               135 ns/op     7378439 ops/s
+  host+path (2 options)                         105 ns/op     9464411 ops/s
+  payload (ACK + 12B body)                       48 ns/op    20817496 ops/s
+  extended delta (opt 258)                       70 ns/op    14200029 ops/s
 ```
 
 Benchmarks use `ArenaAllocator` with retained capacity (reset per iteration, no syscalls after warmup).

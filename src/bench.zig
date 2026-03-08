@@ -107,7 +107,7 @@ fn encodeBench(comptime msg: []const u8) fn () void {
             _ = arena.reset(.retain_capacity);
             const alloc = arena.allocator();
             const pkt = Packet.read(alloc, msg) catch unreachable;
-            const encoded = pkt.write() catch unreachable;
+            const encoded = pkt.write(alloc) catch unreachable;
             doNotOptimize(encoded);
         }
     }.run;
@@ -120,7 +120,7 @@ fn roundtripBench(comptime msg: []const u8) fn () void {
             _ = arena.reset(.retain_capacity);
             const alloc = arena.allocator();
             const pkt = Packet.read(alloc, msg) catch unreachable;
-            const encoded = pkt.write() catch unreachable;
+            const encoded = pkt.write(alloc) catch unreachable;
             const pkt2 = Packet.read(alloc, encoded) catch unreachable;
             doNotOptimize(pkt2);
         }
