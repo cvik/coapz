@@ -52,12 +52,28 @@ defer pkt.deinit(allocator);
 // pkt.options[0].value == "check_ic"
 ```
 
-### Encoding
+### Building packets
 
 ```zig
+const coap = @import("coapz");
+
+var options = [_]coap.Option{
+    .{ .kind = .uri_path, .value = "sensor" },
+    .{ .kind = .uri_path, .value = "temp" },
+};
+
+const pkt = coap.Packet{
+    .kind = .confirmable,
+    .code = .get,
+    .msg_id = 0x1234,
+    .token = &.{ 0xDE, 0xAD },
+    .options = &options,
+    .payload = &.{},
+    .data_buf = &.{},
+};
+
 const encoded = try pkt.write(allocator);
 defer allocator.free(encoded);
-// encoded is a freshly allocated []u8 containing the CoAP wire format
 ```
 
 ### Error handling
