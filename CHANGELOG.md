@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Add allocation-free `writeBuf` for encoding into caller-provided buffers (#5)
+- Add `encodedSize` to query exact wire size without encoding (#5)
+
 ## 0.2.0
 
 - Option value interpretation helpers (`as_uint`, `as_block`, `as_content_format`, `as_string`) (#4)
