@@ -220,6 +220,7 @@ pub const Error = error{
     EmptyPayload,
     UnsortedOptions,
     OutOfMemory,
+    BufferTooSmall,
 };
 
 /// Decoded CoAP packet. Owns its token, option values, and payload through
@@ -328,9 +329,9 @@ pub const Packet = struct {
         };
     }
 
-    /// Encode the packet to CoAP wire format. Caller owns the returned slice.
-    pub fn write(self: Packet, allocator: std.mem.Allocator) Error![]u8 {
-        // Calculate exact output size
+    /// Returns the exact encoded size in bytes without writing anything.
+    /// Validates option sort order.
+    pub fn encodedSize(self: Packet) Error!usize {
         var size: usize = 4 + self.token.len;
         var prev: u16 = 0;
         for (self.options) |opt| {
@@ -344,10 +345,25 @@ pub const Packet = struct {
         if (self.payload.len > 0) {
             size += 1 + self.payload.len;
         }
+        return size;
+    }
 
-        // Single allocation
+    /// Encode into a caller-provided buffer. Returns the filled subslice.
+    pub fn writeBuf(self: Packet, buf: []u8) Error![]u8 {
+        return writeAll(self, buf);
+    }
+
+    /// Encode the packet to CoAP wire format. Caller owns the returned slice.
+    pub fn write(self: Packet, allocator: std.mem.Allocator) Error![]u8 {
+        const size = try self.encodedSize();
         const buf = allocator.alloc(u8, size) catch return Error.OutOfMemory;
         errdefer allocator.free(buf);
+        return writeAll(self, buf);
+    }
+
+    fn writeAll(self: Packet, buf: []u8) Error![]u8 {
+        const size = try self.encodedSize();
+        if (buf.len < size) return Error.BufferTooSmall;
 
         // Header
         const token_len: u8 = @intCast(self.token.len);
@@ -362,7 +378,7 @@ pub const Packet = struct {
         pos += self.token.len;
 
         // Options
-        prev = 0;
+        var prev: u16 = 0;
         for (self.options) |opt| {
             const num = @intFromEnum(opt.kind);
             const delta = num - prev;
@@ -383,7 +399,7 @@ pub const Packet = struct {
             @memcpy(buf[pos .. pos + self.payload.len], self.payload);
         }
 
-        return buf;
+        return buf[0..size];
     }
 
     /// Free the backing buffer and options array.
@@ -1242,4 +1258,59 @@ test "error: unsorted options in write" {
         .data_buf = data_buf,
     };
     try std.testing.expectError(Error.UnsortedOptions, pkt.write(alloc));
+}
+
+test "writeBuf exact-size round-trip" {
+    const alloc = std.testing.allocator;
+    const messages = [_][]const u8{
+        &[_]u8{ 0x44, 0x01, 0xba, 0x22, 0x0c, 0x53, 0x5f, 0xb9, 0xb8, 0x63, 0x68, 0x65, 0x63, 0x6b, 0x5f, 0x69, 0x63 },
+        &[_]u8{ 0x44, 0x02, 0x3e, 0x6f, 0x77, 0x68, 0x52, 0x80, 0xb1, 0x31, 0x01, 0x32, 0x01, 0x33, 0xff, 0x64, 0x61, 0x74, 0x61 },
+        &[_]u8{ 0x40, 0x01, 0x00, 0x00 },
+    };
+    for (messages) |msg| {
+        const pkt = try Packet.read(alloc, msg);
+        defer pkt.deinit(alloc);
+        var buf: [256]u8 = undefined;
+        const exact = try pkt.encodedSize();
+        const enc = try pkt.writeBuf(buf[0..exact]);
+        try std.testing.expectEqualSlices(u8, msg, enc);
+    }
+}
+
+test "writeBuf oversized buffer returns correct subslice" {
+    const alloc = std.testing.allocator;
+    const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00 };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit(alloc);
+    var buf: [256]u8 = undefined;
+    const enc = try pkt.writeBuf(&buf);
+    try std.testing.expectEqual(@as(usize, 4), enc.len);
+    try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "writeBuf too small returns BufferTooSmall" {
+    const alloc = std.testing.allocator;
+    const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00 };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit(alloc);
+    var buf: [3]u8 = undefined;
+    try std.testing.expectError(Error.BufferTooSmall, pkt.writeBuf(&buf));
+}
+
+test "encodedSize matches actual encoded length" {
+    const alloc = std.testing.allocator;
+    const messages = [_][]const u8{
+        &[_]u8{ 0x40, 0x01, 0x00, 0x00 },
+        &[_]u8{ 0x64, 0x45, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74, 0xFF, 0x48, 0x65, 0x6C, 0x6C, 0x6F, 0x20, 0x57, 0x6F, 0x72, 0x6C, 0x64, 0x21 },
+        &[_]u8{ 0x40, 0x01, 0x00, 0x01, 0xD1, 0xF5, 0x02 },
+    };
+    for (messages) |msg| {
+        const pkt = try Packet.read(alloc, msg);
+        defer pkt.deinit(alloc);
+        const size = try pkt.encodedSize();
+        try std.testing.expectEqual(msg.len, size);
+        const enc = try pkt.write(alloc);
+        defer alloc.free(enc);
+        try std.testing.expectEqual(size, enc.len);
+    }
 }
