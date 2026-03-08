@@ -75,12 +75,97 @@ pub const OptionKind = enum(u16) {
     size1 = 60,
     no_response = 258,
     _,
+
+    /// Option value format per RFC 7252 Table 5.
+    pub const Format = enum { empty, @"opaque", uint, string };
+
+    pub fn format(self: OptionKind) Format {
+        return switch (self) {
+            .if_none_match => .empty,
+            .unknown, .if_match, .etag, .oscore => .@"opaque",
+            .uri_host, .location_path, .uri_path,
+            .uri_query, .location_query,
+            .proxy_uri, .proxy_scheme,
+            => .string,
+            .observe, .uri_port, .content_format,
+            .max_age, .accept, .block2, .block1,
+            .size2, .size1, .no_response,
+            => .uint,
+            _ => .@"opaque",
+        };
+    }
+};
+
+pub const ContentFormat = @import("content_format.zig").ContentFormat;
+
+/// Parsed block option value per RFC 7959 §2.2.
+pub const BlockValue = struct {
+    num: u32,
+    more: bool,
+    szx: u3,
+
+    /// Block size in bytes: 2^(szx + 4).
+    pub fn size(self: BlockValue) u16 {
+        return @as(u16, 1) << (@as(u4, self.szx) + 4);
+    }
+};
+
+/// Iterator over options matching a specific kind.
+pub const OptionIterator = struct {
+    options: []const Option,
+    kind: OptionKind,
+    pos: usize = 0,
+
+    pub fn next(self: *OptionIterator) ?Option {
+        while (self.pos < self.options.len) {
+            const opt = self.options[self.pos];
+            self.pos += 1;
+            if (opt.kind == self.kind) return opt;
+        }
+        return null;
+    }
+
+    pub fn reset(self: *OptionIterator) void {
+        self.pos = 0;
+    }
 };
 
 /// A single CoAP option (number + opaque value).
 pub const Option = struct {
     kind: OptionKind,
     value: []const u8,
+
+    /// Interpret value as a big-endian uint (0-4 bytes, per RFC 7252 §3.2).
+    /// Empty value returns 0. Returns null if value exceeds 4 bytes.
+    pub fn as_uint(self: Option) ?u32 {
+        if (self.value.len > 4) return null;
+        var result: u32 = 0;
+        for (self.value) |b| result = result << 8 | b;
+        return result;
+    }
+
+    /// Return value as a string (CoAP strings are UTF-8, no interpretation needed).
+    pub fn as_string(self: Option) []const u8 {
+        return self.value;
+    }
+
+    /// Interpret value as a ContentFormat enum.
+    pub fn as_content_format(self: Option) ?ContentFormat {
+        const val = self.as_uint() orelse return null;
+        return ContentFormat.from_uint(val);
+    }
+
+    /// Interpret value as a block option (RFC 7959 §2.2).
+    /// Valid for 1-3 byte values. Returns null otherwise.
+    pub fn as_block(self: Option) ?BlockValue {
+        if (self.value.len == 0 or self.value.len > 3) return null;
+        const val = self.as_uint() orelse return null;
+        return .{
+            .num = val >> 4,
+            .more = val & 0x08 != 0,
+            .szx = @intCast(val & 0x07),
+        };
+    }
 };
 
 /// Errors returned when decoding/encoding a malformed CoAP packet.
@@ -104,6 +189,19 @@ pub const Packet = struct {
     options: []const Option,
     payload: []const u8,
     data_buf: []const u8,
+
+    /// Find the first option matching the given kind.
+    pub fn find_option(self: Packet, kind: OptionKind) ?Option {
+        for (self.options) |opt| {
+            if (opt.kind == kind) return opt;
+        }
+        return null;
+    }
+
+    /// Return an iterator over all options matching the given kind.
+    pub fn find_options(self: Packet, kind: OptionKind) OptionIterator {
+        return .{ .options = self.options, .kind = kind };
+    }
 
     /// Decode a CoAP packet from raw bytes. Returns `Error` on malformed input.
     pub fn read(alloc: std.mem.Allocator, data: []const u8) Error!Packet {
@@ -852,6 +950,132 @@ test "unknown response code round-trip" {
     const enc = try pkt.write(alloc);
     defer alloc.free(enc);
     try std.testing.expectEqualSlices(u8, &msg, enc);
+}
+
+test "as_uint" {
+    const opt = Option{ .kind = .max_age, .value = &.{} };
+    try std.testing.expectEqual(@as(u32, 0), opt.as_uint().?);
+
+    const opt1 = Option{ .kind = .max_age, .value = &.{0x2A} };
+    try std.testing.expectEqual(@as(u32, 42), opt1.as_uint().?);
+
+    const opt2 = Option{ .kind = .max_age, .value = &.{ 0x01, 0x00 } };
+    try std.testing.expectEqual(@as(u32, 256), opt2.as_uint().?);
+
+    const opt4 = Option{ .kind = .max_age, .value = &.{ 0x00, 0x01, 0x51, 0x80 } };
+    try std.testing.expectEqual(@as(u32, 86400), opt4.as_uint().?);
+
+    // 5 bytes => null
+    const opt5 = Option{ .kind = .max_age, .value = &.{ 0x01, 0x02, 0x03, 0x04, 0x05 } };
+    try std.testing.expectEqual(@as(?u32, null), opt5.as_uint());
+}
+
+test "as_content_format" {
+    const json_opt = Option{ .kind = .content_format, .value = &.{50} };
+    try std.testing.expectEqual(ContentFormat.json, json_opt.as_content_format().?);
+
+    const cbor_opt = Option{ .kind = .content_format, .value = &.{60} };
+    try std.testing.expectEqual(ContentFormat.cbor, cbor_opt.as_content_format().?);
+
+    // Unknown value via wildcard
+    const unknown_opt = Option{ .kind = .content_format, .value = &.{ 0x27, 0x0F } };
+    try std.testing.expectEqual(@as(u16, 9999), @intFromEnum(unknown_opt.as_content_format().?));
+}
+
+test "as_block" {
+    // 1-byte: num=0, more=true, szx=6 => 0x0E
+    const b1 = Option{ .kind = .block2, .value = &.{0x0E} };
+    const bv1 = b1.as_block().?;
+    try std.testing.expectEqual(@as(u32, 0), bv1.num);
+    try std.testing.expectEqual(true, bv1.more);
+    try std.testing.expectEqual(@as(u3, 6), bv1.szx);
+
+    // 2-byte: num=4, more=false, szx=2 => 0x00 0x42
+    const b2 = Option{ .kind = .block1, .value = &.{ 0x00, 0x42 } };
+    const bv2 = b2.as_block().?;
+    try std.testing.expectEqual(@as(u32, 4), bv2.num);
+    try std.testing.expectEqual(false, bv2.more);
+    try std.testing.expectEqual(@as(u3, 2), bv2.szx);
+
+    // 3-byte: num=256, more=true, szx=3 => 0x00 0x10 0x0B
+    const b3 = Option{ .kind = .block2, .value = &.{ 0x00, 0x10, 0x0B } };
+    const bv3 = b3.as_block().?;
+    try std.testing.expectEqual(@as(u32, 256), bv3.num);
+    try std.testing.expectEqual(true, bv3.more);
+    try std.testing.expectEqual(@as(u3, 3), bv3.szx);
+
+    // Empty => null
+    const empty = Option{ .kind = .block2, .value = &.{} };
+    try std.testing.expectEqual(@as(?BlockValue, null), empty.as_block());
+
+    // 4-byte => null
+    const too_long = Option{ .kind = .block2, .value = &.{ 0x01, 0x02, 0x03, 0x04 } };
+    try std.testing.expectEqual(@as(?BlockValue, null), too_long.as_block());
+}
+
+test "BlockValue.size" {
+    var szx: u4 = 0;
+    while (szx < 7) : (szx += 1) {
+        const bv = BlockValue{ .num = 0, .more = false, .szx = @intCast(szx) };
+        const expected: u16 = @as(u16, 1) << (szx + 4);
+        try std.testing.expectEqual(expected, bv.size());
+    }
+}
+
+test "find_option" {
+    const alloc = std.testing.allocator;
+    // CON GET with uri_host="localhost", uri_path="tv1"
+    const msg = [_]u8{
+        0x44, 0x01, 0x5D, 0x1F, 0x00, 0x00, 0x39, 0x74,
+        0x39, 0x6C, 0x6F, 0x63, 0x61, 0x6C, 0x68, 0x6F,
+        0x73, 0x74, 0x83, 0x74, 0x76, 0x31,
+    };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit(alloc);
+
+    const host = pkt.find_option(.uri_host).?;
+    try std.testing.expectEqualSlices(u8, "localhost", host.as_string());
+
+    try std.testing.expectEqual(@as(?Option, null), pkt.find_option(.content_format));
+}
+
+test "find_options iterator" {
+    const alloc = std.testing.allocator;
+    // Three uri_path options: "a", "b", "c"
+    const msg = [_]u8{
+        0x40, 0x01, 0x00, 0x00,
+        0xB1, 0x61, // uri_path "a"
+        0x01, 0x62, // uri_path "b"
+        0x01, 0x63, // uri_path "c"
+    };
+    const pkt = try Packet.read(alloc, &msg);
+    defer pkt.deinit(alloc);
+
+    var it = pkt.find_options(.uri_path);
+    try std.testing.expectEqualSlices(u8, "a", it.next().?.value);
+    try std.testing.expectEqualSlices(u8, "b", it.next().?.value);
+    try std.testing.expectEqualSlices(u8, "c", it.next().?.value);
+    try std.testing.expectEqual(@as(?Option, null), it.next());
+
+    // Reset
+    it.reset();
+    try std.testing.expectEqualSlices(u8, "a", it.next().?.value);
+
+    // Empty iterator
+    var empty = pkt.find_options(.content_format);
+    try std.testing.expectEqual(@as(?Option, null), empty.next());
+}
+
+test "OptionKind.format" {
+    try std.testing.expectEqual(OptionKind.Format.string, OptionKind.uri_host.format());
+    try std.testing.expectEqual(OptionKind.Format.string, OptionKind.uri_path.format());
+    try std.testing.expectEqual(OptionKind.Format.uint, OptionKind.content_format.format());
+    try std.testing.expectEqual(OptionKind.Format.uint, OptionKind.max_age.format());
+    try std.testing.expectEqual(OptionKind.Format.empty, OptionKind.if_none_match.format());
+    try std.testing.expectEqual(OptionKind.Format.@"opaque", OptionKind.etag.format());
+    // Unknown option
+    const unknown: OptionKind = @enumFromInt(@as(u16, 999));
+    try std.testing.expectEqual(OptionKind.Format.@"opaque", unknown.format());
 }
 
 test "error: unsorted options in write" {

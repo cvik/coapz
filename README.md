@@ -76,6 +76,41 @@ const encoded = try pkt.write(allocator);
 defer allocator.free(encoded);
 ```
 
+### Option interpretation
+
+```zig
+const coap = @import("coapz");
+
+const pkt = try coap.Packet.read(allocator, raw_bytes);
+defer pkt.deinit(allocator);
+
+// Find a single option
+if (pkt.find_option(.content_format)) |opt| {
+    const fmt = opt.as_content_format(); // ?ContentFormat
+    // fmt.? == .json, .cbor, etc.
+}
+
+// Integer options (0-4 byte big-endian)
+if (pkt.find_option(.max_age)) |opt| {
+    const seconds = opt.as_uint(); // ?u32, empty value returns 0
+}
+
+// Block-wise transfer (RFC 7959)
+if (pkt.find_option(.block2)) |opt| {
+    const blk = opt.as_block().?; // BlockValue
+    // blk.num  -- block number
+    // blk.more -- more blocks follow
+    // blk.size() -- block size in bytes (2^(szx+4))
+}
+
+// Iterate repeated options (e.g. uri_path segments)
+var it = pkt.find_options(.uri_path);
+while (it.next()) |opt| {
+    const segment = opt.as_string();
+    _ = segment;
+}
+```
+
 ### Error handling
 
 `Packet.read` returns the following errors for malformed input:
