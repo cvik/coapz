@@ -57,9 +57,14 @@ defer pkt.deinit(allocator);
 ```zig
 const coap = @import("coapz");
 
+var cf_buf: [2]u8 = undefined;
+var blk_buf: [3]u8 = undefined;
+
 var options = [_]coap.Option{
     .{ .kind = .uri_path, .value = "sensor" },
     .{ .kind = .uri_path, .value = "temp" },
+    coap.Option.content_format(.cbor, &cf_buf),
+    (coap.BlockValue{ .num = 0, .more = true, .szx = 2 }).option(.block2, &blk_buf),
 };
 
 const pkt = coap.Packet{
@@ -74,6 +79,21 @@ const pkt = coap.Packet{
 
 const encoded = try pkt.write(allocator);
 defer allocator.free(encoded);
+```
+
+Typed option constructors avoid manual byte encoding:
+
+```zig
+var buf: [4]u8 = undefined;
+
+// Uint options (max_age, uri_port, size1, etc.)
+const max_age = coap.Option.uint(.max_age, 3600, &buf);
+
+// Empty options (if_none_match)
+const if_none = coap.Option.empty(.if_none_match);
+
+_ = max_age;
+_ = if_none;
 ```
 
 ### Option interpretation

@@ -108,6 +108,24 @@ pub const BlockValue = struct {
     pub fn size(self: BlockValue) u16 {
         return @as(u16, 1) << (@as(u4, self.szx) + 4);
     }
+
+    /// Encode as a CoAP block option (1-3 bytes per RFC 7959 §2.2).
+    pub fn option(self: BlockValue, kind: OptionKind, buf: *[3]u8) Option {
+        const val: u32 = (self.num << 4) | (@as(u32, @intFromBool(self.more)) << 3) | self.szx;
+        if (val <= 0xff) {
+            buf[0] = @intCast(val);
+            return .{ .kind = kind, .value = buf[0..1] };
+        } else if (val <= 0xffff) {
+            buf[0] = @intCast(val >> 8);
+            buf[1] = @intCast(val & 0xff);
+            return .{ .kind = kind, .value = buf[0..2] };
+        } else {
+            buf[0] = @intCast(val >> 16);
+            buf[1] = @intCast(val >> 8 & 0xff);
+            buf[2] = @intCast(val & 0xff);
+            return .{ .kind = kind, .value = buf[0..3] };
+        }
+    }
 };
 
 /// Iterator over options matching a specific kind.
@@ -134,6 +152,31 @@ pub const OptionIterator = struct {
 pub const Option = struct {
     kind: OptionKind,
     value: []const u8,
+
+    /// Create an option with an empty value (e.g. if_none_match).
+    pub fn empty(kind: OptionKind) Option {
+        return .{ .kind = kind, .value = &.{} };
+    }
+
+    /// Create an option with a uint value, using minimal bytes per RFC 7252 §3.2.
+    pub fn uint(kind: OptionKind, val: u32, buf: *[4]u8) Option {
+        if (val == 0) return .{ .kind = kind, .value = &.{} };
+        buf[0] = @intCast(val >> 24);
+        buf[1] = @intCast(val >> 16 & 0xff);
+        buf[2] = @intCast(val >> 8 & 0xff);
+        buf[3] = @intCast(val & 0xff);
+        const skip: usize = if (buf[0] != 0) 0 else if (buf[1] != 0) 1 else if (buf[2] != 0) 2 else 3;
+        return .{ .kind = kind, .value = buf[skip..] };
+    }
+
+    /// Create a content_format option from a ContentFormat value.
+    pub fn content_format(fmt: ContentFormat, buf: *[2]u8) Option {
+        const val: u16 = @intFromEnum(fmt);
+        buf[0] = @intCast(val >> 8);
+        buf[1] = @intCast(val & 0xff);
+        const skip: usize = if (buf[0] != 0) 0 else 1;
+        return .{ .kind = .content_format, .value = buf[skip..] };
+    }
 
     /// Interpret value as a big-endian uint (0-4 bytes, per RFC 7252 §3.2).
     /// Empty value returns 0. Returns null if value exceeds 4 bytes.
@@ -1076,6 +1119,108 @@ test "OptionKind.format" {
     // Unknown option
     const unknown: OptionKind = @enumFromInt(@as(u16, 999));
     try std.testing.expectEqual(OptionKind.Format.@"opaque", unknown.format());
+}
+
+test "Option.empty" {
+    const opt = Option.empty(.if_none_match);
+    try std.testing.expectEqual(OptionKind.if_none_match, opt.kind);
+    try std.testing.expectEqual(@as(usize, 0), opt.value.len);
+}
+
+test "Option.uint" {
+    var buf: [4]u8 = undefined;
+
+    // Zero => empty value
+    const o0 = Option.uint(.max_age, 0, &buf);
+    try std.testing.expectEqual(@as(usize, 0), o0.value.len);
+    try std.testing.expectEqual(@as(u32, 0), o0.as_uint().?);
+
+    // 1-byte
+    const o1 = Option.uint(.max_age, 42, &buf);
+    try std.testing.expectEqual(@as(usize, 1), o1.value.len);
+    try std.testing.expectEqual(@as(u32, 42), o1.as_uint().?);
+
+    // 2-byte
+    const o2 = Option.uint(.uri_port, 5683, &buf);
+    try std.testing.expectEqual(@as(usize, 2), o2.value.len);
+    try std.testing.expectEqual(@as(u32, 5683), o2.as_uint().?);
+
+    // 4-byte
+    const o4 = Option.uint(.max_age, 86400, &buf);
+    try std.testing.expectEqual(@as(u32, 86400), o4.as_uint().?);
+
+    // Max u32
+    const omax = Option.uint(.size1, 0xFFFFFFFF, &buf);
+    try std.testing.expectEqual(@as(usize, 4), omax.value.len);
+    try std.testing.expectEqual(@as(u32, 0xFFFFFFFF), omax.as_uint().?);
+}
+
+test "Option.content_format" {
+    var buf: [2]u8 = undefined;
+
+    const json_opt = Option.content_format(.json, &buf);
+    try std.testing.expectEqual(OptionKind.content_format, json_opt.kind);
+    try std.testing.expectEqual(ContentFormat.json, json_opt.as_content_format().?);
+
+    // Value > 255 needs 2 bytes
+    const lwm2m = Option.content_format(.vnd_oma_lwm2m_tlv, &buf);
+    try std.testing.expectEqual(@as(usize, 2), lwm2m.value.len);
+    try std.testing.expectEqual(ContentFormat.vnd_oma_lwm2m_tlv, lwm2m.as_content_format().?);
+}
+
+test "BlockValue.option" {
+    var buf: [3]u8 = undefined;
+
+    // 1-byte block value
+    const bv1 = BlockValue{ .num = 0, .more = true, .szx = 2 };
+    const o1 = bv1.option(.block2, &buf);
+    try std.testing.expectEqual(@as(usize, 1), o1.value.len);
+    const parsed1 = o1.as_block().?;
+    try std.testing.expectEqual(bv1.num, parsed1.num);
+    try std.testing.expectEqual(bv1.more, parsed1.more);
+    try std.testing.expectEqual(bv1.szx, parsed1.szx);
+
+    // 2-byte block value
+    const bv2 = BlockValue{ .num = 100, .more = false, .szx = 5 };
+    const o2 = bv2.option(.block1, &buf);
+    try std.testing.expectEqual(@as(usize, 2), o2.value.len);
+    const parsed2 = o2.as_block().?;
+    try std.testing.expectEqual(bv2.num, parsed2.num);
+    try std.testing.expectEqual(bv2.more, parsed2.more);
+    try std.testing.expectEqual(bv2.szx, parsed2.szx);
+
+    // 3-byte block value (num=4096 => val = 4096<<4 | 8 | 3 = 0x1000B)
+    const bv3 = BlockValue{ .num = 4096, .more = true, .szx = 3 };
+    const o3 = bv3.option(.block2, &buf);
+    try std.testing.expectEqual(@as(usize, 3), o3.value.len);
+    const parsed3 = o3.as_block().?;
+    try std.testing.expectEqual(bv3.num, parsed3.num);
+    try std.testing.expectEqual(bv3.more, parsed3.more);
+    try std.testing.expectEqual(bv3.szx, parsed3.szx);
+}
+
+test "Option.uint round-trip encode" {
+    const alloc = std.testing.allocator;
+    var uint_buf: [4]u8 = undefined;
+
+    var options = [_]Option{
+        Option.uint(.content_format, 50, &uint_buf),
+    };
+    const pkt = Packet{
+        .kind = .confirmable,
+        .code = .post,
+        .msg_id = 0x0001,
+        .token = &.{},
+        .options = &options,
+        .payload = "hello",
+        .data_buf = &.{},
+    };
+    const enc = try pkt.write(alloc);
+    defer alloc.free(enc);
+    const dec = try Packet.read(alloc, enc);
+    defer dec.deinit(alloc);
+    try std.testing.expectEqual(ContentFormat.json, dec.options[0].as_content_format().?);
+    try std.testing.expectEqualSlices(u8, "hello", dec.payload);
 }
 
 test "error: unsorted options in write" {
