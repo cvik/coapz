@@ -101,9 +101,9 @@ pub const Packet = struct {
     code: Code,
     msg_id: u16,
     token: []const u8,
-    options: []Option,
+    options: []const Option,
     payload: []const u8,
-    data_buf: []u8,
+    data_buf: []const u8,
 
     /// Decode a CoAP packet from raw bytes. Returns `Error` on malformed input.
     pub fn read(alloc: std.mem.Allocator, data: []const u8) Error!Packet {
