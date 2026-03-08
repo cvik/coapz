@@ -42,7 +42,7 @@ const data = [_]u8{
 };
 
 const pkt = try coap.Packet.read(allocator, &data);
-defer pkt.deinit();
+defer pkt.deinit(allocator);
 
 // pkt.kind     == .confirmable
 // pkt.code     == .get
