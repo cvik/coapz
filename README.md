@@ -76,13 +76,6 @@ const encoded = try pkt.write(allocator);
 defer allocator.free(encoded);
 ```
 
-### Encoding a decoded packet
-
-```zig
-const encoded = try pkt.write(allocator);
-defer allocator.free(encoded);
-```
-
 ### Error handling
 
 `Packet.read` returns the following errors for malformed input:
