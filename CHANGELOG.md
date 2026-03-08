@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Option value interpretation helpers (`as_uint`, `as_block`, `as_content_format`, `as_string`) (#4)
+- Option value construction helpers (`Option.uint`, `Option.empty`, `Option.content_format`, `BlockValue.option`) (#4)
+- Const packet fields for safer usage (#3)
+- Security, correctness, and ergonomics fixes (#2)
+- Benchmarks switched to ArenaAllocator (~100x faster results) (#1)
+
 ## 0.1.0
 
 Initial release.
