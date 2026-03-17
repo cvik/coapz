@@ -247,6 +247,65 @@ pub const Packet = struct {
         return .{ .options = self.options, .kind = kind };
     }
 
+    /// Extract the message kind from raw wire data without decoding.
+    pub fn peekKind(data: []const u8) ?MessageKind {
+        if (data.len < 1) return null;
+        return @enumFromInt((data[0] >> 4) & 0x03);
+    }
+
+    /// Extract the message ID from raw wire data without decoding.
+    pub fn peekMsgId(data: []const u8) ?u16 {
+        if (data.len < 4) return null;
+        return @as(u16, data[2]) << 8 | data[3];
+    }
+
+    /// Scan raw wire data for the first option matching `kind` without allocating.
+    /// The returned Option's value points directly into `data`.
+    pub fn peekOption(data: []const u8, kind: OptionKind) ?Option {
+        if (data.len < 4) return null;
+        const tkl: usize = data[0] & 0x0F;
+        if (tkl > 8 or data.len < 4 + tkl) return null;
+        var pos: usize = 4 + tkl;
+        var opt_num: u32 = 0;
+        const target: u32 = @intFromEnum(kind);
+
+        while (pos < data.len) {
+            const c0 = data[pos];
+            pos += 1;
+            if (c0 == 0xff) break;
+            const delta: u32 = readVarLen(data, &pos, @intCast(c0 >> 4 & 0xf)) catch return null;
+            const val_len: usize = readVarLen(data, &pos, @intCast(c0 & 0xf)) catch return null;
+            if (pos + val_len > data.len) return null;
+            opt_num += delta;
+
+            if (opt_num == target) {
+                return .{ .kind = kind, .value = data[pos..][0..val_len] };
+            }
+            if (opt_num > target) return null;
+
+            pos += val_len;
+        }
+        return null;
+    }
+
+    /// Write a 4-byte empty ACK into `buf`.
+    pub fn emptyAck(msg_id: u16, buf: *[4]u8) []const u8 {
+        buf[0] = 0x60;
+        buf[1] = 0x00;
+        buf[2] = @intCast(msg_id >> 8);
+        buf[3] = @intCast(msg_id & 0xff);
+        return buf;
+    }
+
+    /// Write a 4-byte empty RST into `buf`.
+    pub fn emptyRst(msg_id: u16, buf: *[4]u8) []const u8 {
+        buf[0] = 0x70;
+        buf[1] = 0x00;
+        buf[2] = @intCast(msg_id >> 8);
+        buf[3] = @intCast(msg_id & 0xff);
+        return buf;
+    }
+
     /// Decode a CoAP packet from raw bytes. Returns `Error` on malformed input.
     pub fn read(alloc: std.mem.Allocator, data: []const u8) Error!Packet {
         if (data.len < 4) return Error.MessageTooShort;
@@ -1313,4 +1372,104 @@ test "encodedSize matches actual encoded length" {
         defer alloc.free(enc);
         try std.testing.expectEqual(size, enc.len);
     }
+}
+
+test "peekKind" {
+    try std.testing.expectEqual(MessageKind.confirmable, Packet.peekKind(&.{ 0x40, 0x01, 0x00, 0x00 }).?);
+    try std.testing.expectEqual(MessageKind.non_confirmable, Packet.peekKind(&.{ 0x50, 0x01, 0x00, 0x00 }).?);
+    try std.testing.expectEqual(MessageKind.acknowledgement, Packet.peekKind(&.{ 0x60, 0x45, 0x00, 0x01 }).?);
+    try std.testing.expectEqual(MessageKind.reset, Packet.peekKind(&.{ 0x70, 0x00, 0x00, 0x01 }).?);
+    try std.testing.expectEqual(@as(?MessageKind, null), Packet.peekKind(&.{}));
+}
+
+test "peekMsgId" {
+    try std.testing.expectEqual(@as(u16, 0xBA22), Packet.peekMsgId(&.{ 0x44, 0x01, 0xBA, 0x22 }).?);
+    try std.testing.expectEqual(@as(u16, 0x0000), Packet.peekMsgId(&.{ 0x40, 0x01, 0x00, 0x00 }).?);
+    try std.testing.expectEqual(@as(u16, 0xFFFF), Packet.peekMsgId(&.{ 0x40, 0x01, 0xFF, 0xFF }).?);
+    try std.testing.expectEqual(@as(?u16, null), Packet.peekMsgId(&.{ 0x40, 0x01, 0x00 }));
+}
+
+test "peekOption: observe" {
+    // CON GET with Observe option (6) = sequence 1, token=0xAB
+    const msg = [_]u8{
+        0x41, 0x01, 0x00, 0x01, 0xAB, // header: tkl=1, token=0xAB
+        0x61, 0x01, // option: delta=6 (observe), len=1, value=0x01
+    };
+    const opt = Packet.peekOption(&msg, .observe).?;
+    try std.testing.expectEqual(OptionKind.observe, opt.kind);
+    try std.testing.expectEqual(@as(u32, 1), opt.as_uint().?);
+}
+
+test "peekOption: missing option" {
+    const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00 };
+    try std.testing.expectEqual(@as(?Option, null), Packet.peekOption(&msg, .observe));
+}
+
+test "peekOption: option past target" {
+    // Option with delta=11 (uri_path) — observe (6) comes before, so not found.
+    const msg = [_]u8{ 0x40, 0x01, 0x00, 0x00, 0xB1, 0x61 };
+    try std.testing.expectEqual(@as(?Option, null), Packet.peekOption(&msg, .observe));
+}
+
+test "peekOption: with extended delta" {
+    const alloc = std.testing.allocator;
+    // Build a packet with block2 (23) using extended delta.
+    var uint_buf: [4]u8 = undefined;
+    var b2_buf: [3]u8 = undefined;
+    const options = [_]Option{
+        Option.uint(.observe, 5, &uint_buf),
+        (BlockValue{ .num = 3, .more = true, .szx = 6 }).option(.block2, &b2_buf),
+    };
+    const pkt = Packet{
+        .kind = .confirmable,
+        .code = .get,
+        .msg_id = 0x1234,
+        .token = &.{0xAA},
+        .options = &options,
+        .payload = &.{},
+        .data_buf = &.{},
+    };
+    const wire = try pkt.write(alloc);
+    defer alloc.free(wire);
+
+    // Peek for block2 in the encoded wire data.
+    const opt = Packet.peekOption(wire, .block2).?;
+    const bv = opt.as_block().?;
+    try std.testing.expectEqual(@as(u32, 3), bv.num);
+    try std.testing.expect(bv.more);
+    try std.testing.expectEqual(@as(u3, 6), bv.szx);
+}
+
+test "peekOption: truncated data" {
+    try std.testing.expectEqual(@as(?Option, null), Packet.peekOption(&.{}, .observe));
+    try std.testing.expectEqual(@as(?Option, null), Packet.peekOption(&.{ 0x40, 0x01 }, .observe));
+    // Token extends past data.
+    try std.testing.expectEqual(@as(?Option, null), Packet.peekOption(&.{ 0x44, 0x01, 0x00, 0x00 }, .observe));
+}
+
+test "emptyAck" {
+    var buf: [4]u8 = undefined;
+    const ack = Packet.emptyAck(0x1234, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0x60, 0x00, 0x12, 0x34 }, ack);
+
+    // Verify it round-trips through read.
+    const alloc = std.testing.allocator;
+    const pkt = try Packet.read(alloc, ack);
+    defer pkt.deinit(alloc);
+    try std.testing.expectEqual(MessageKind.acknowledgement, pkt.kind);
+    try std.testing.expectEqual(Code.empty, pkt.code);
+    try std.testing.expectEqual(@as(u16, 0x1234), pkt.msg_id);
+}
+
+test "emptyRst" {
+    var buf: [4]u8 = undefined;
+    const rst = Packet.emptyRst(0xABCD, &buf);
+    try std.testing.expectEqualSlices(u8, &.{ 0x70, 0x00, 0xAB, 0xCD }, rst);
+
+    const alloc = std.testing.allocator;
+    const pkt = try Packet.read(alloc, rst);
+    defer pkt.deinit(alloc);
+    try std.testing.expectEqual(MessageKind.reset, pkt.kind);
+    try std.testing.expectEqual(Code.empty, pkt.code);
+    try std.testing.expectEqual(@as(u16, 0xABCD), pkt.msg_id);
 }
