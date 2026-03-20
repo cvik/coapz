@@ -98,6 +98,13 @@ pub const OptionKind = enum(u16) {
 
 pub const ContentFormat = @import("content_format.zig").ContentFormat;
 
+/// Observe option registration values per RFC 7641 §2.
+pub const Observe = enum(u32) {
+    subscribe = 0,
+    unsubscribe = 1,
+    _,
+};
+
 /// Parsed block option value per RFC 7959 §2.2.
 pub const BlockValue = struct {
     num: u32,
