@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Frontend-inline option length decoding to avoid error-result stack temporaries
+- Exhaustively check option length values, truncation/overflow errors and cursor movement
+
 ## 0.2.1
 
 - Add allocation-free `writeBuf` for encoding into caller-provided buffers (#5)

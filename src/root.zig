@@ -505,7 +505,9 @@ fn extendedSize(val: u16) usize {
     };
 }
 
-fn readVarLen(data: []const u8, pos: *usize, nibble: u4) Error!u16 {
+// Frontend inlining avoids materializing error-union temporaries in option loops.
+// LLVM inlining alone can retain narrow-store/wider-load dependencies (Zig 0.16).
+inline fn readVarLen(data: []const u8, pos: *usize, nibble: u4) Error!u16 {
     return switch (nibble) {
         13 => blk: {
             if (pos.* >= data.len) return Error.TruncatedOption;
@@ -522,6 +524,43 @@ fn readVarLen(data: []const u8, pos: *usize, nibble: u4) Error!u16 {
         15 => Error.TruncatedOption,
         else => nibble,
     };
+}
+
+test "option lengths preserve values, errors and cursor movement" {
+    for (0..16) |nibble| {
+        for (0..65536) |word| {
+            for (0..3) |prefix| {
+                var bytes: [4]u8 = @splat(0xa5);
+                bytes[prefix] = @truncate(word >> 8);
+                bytes[prefix + 1] = @truncate(word);
+                for (0..3) |available| {
+                    var pos = prefix;
+                    const result = readVarLen(bytes[0 .. prefix + available], &pos, @intCast(nibble));
+                    const valid = nibble < 13 or
+                        (nibble == 13 and available >= 1) or
+                        (nibble == 14 and available >= 2 and word <= 65535 - 269);
+                    const consumed: usize = if (nibble == 13 and available >= 1)
+                        1
+                    else if (nibble == 14 and available >= 2)
+                        2
+                    else
+                        0;
+                    try std.testing.expectEqual(prefix + consumed, pos);
+                    if (valid) {
+                        const expected: u16 = @intCast(if (nibble < 13)
+                            nibble
+                        else if (nibble == 13)
+                            (word >> 8) + 13
+                        else
+                            word + 269);
+                        try std.testing.expectEqual(expected, try result);
+                    } else {
+                        try std.testing.expectError(error.TruncatedOption, result);
+                    }
+                }
+            }
+        }
+    }
 }
 
 test "decode assertions" {
