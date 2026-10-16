@@ -1,9 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.4.0
 
-- Frontend-inline option length decoding to avoid error-result stack temporaries
-- Exhaustively check option length values, truncation/overflow errors and cursor movement
+- Add public `Observe` values for subscribe/unsubscribe requests (#7)
+- Frontend-inline option length decoding to avoid error-result stack temporaries (#8)
+- Exhaustively check option length values, truncation/overflow errors and cursor movement (#8)
+
+## 0.3.0
+
+- Add allocation-free `Packet.peekKind`, `Packet.peekMsgId`, and `Packet.peekOption` helpers (#6)
+- Add `Packet.emptyAck` and `Packet.emptyRst` wire helpers (#6)
 
 ## 0.2.1
 
