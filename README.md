@@ -12,6 +12,13 @@ Handles binary CoAP message serialization only -- no transport, no retransmissio
 - RFC 7959 -- Block-Wise Transfers (option parsing)
 - RFC 8516 -- Too Many Requests Response Code
 
+## Toolchain
+
+The minimum Zig version is 0.15.1. On Apple Silicon, unpatched Zig 0.15 cannot
+read the arm64e-only system-library stubs in macOS SDK 26.4 and newer. Select a
+compatible Xcode installation using `DEVELOPER_DIR`; CI uses Xcode 26.2/SDK 26.2
+without changing the Zig version or ARM runner.
+
 ## Installation
 
 Add as a Zig package dependency:
